@@ -19,6 +19,7 @@ STAGES: tuple[StageSpec, ...] = (
     StageSpec("tts", "VoxCPM"),
     StageSpec("merge_audio", "Merge audio"),
     StageSpec("merge_video", "Merge video"),
+    StageSpec("summary", "Generate summary"),
 )
 
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -64,36 +63,48 @@ def _client(base_url: str, api_key: str) -> OpenAI:
     return OpenAI(api_key=api_key, base_url=normalize_openai_base_url(base_url))
 
 
-_JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
-
-
 def _extract_json(raw: str) -> dict[str, Any]:
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
         pass
-    match = _JSON_BLOCK_RE.search(raw)
-    if not match:
-        raise json.JSONDecodeError(f"no JSON object found; raw[:300]={raw[:300]!r}", raw, 0)
-    try:
-        return json.loads(match.group(0))
-    except json.JSONDecodeError as exc:
-        raise json.JSONDecodeError(
-            f"{exc.msg}; len={len(raw)}; raw[:300]={raw[:300]!r}; raw[-200:]={raw[-200:]!r}",
-            raw,
-            exc.pos,
-        ) from None
+    # Some models wrap the JSON with explanation text before/after the object.
+    # Use raw_decode to locate the first complete JSON object anywhere in the
+    # response instead of greedily matching the whole payload.
+    decoder = json.JSONDecoder()
+    text = raw.strip()
+    search_from = 0
+    while True:
+        start = text.find("{", search_from)
+        if start == -1:
+            break
+        try:
+            obj, _ = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            search_from = start + 1
+            continue
+        if isinstance(obj, dict):
+            return obj
+        search_from = start + 1
+    raise json.JSONDecodeError(f"no JSON object found; raw[:300]={raw[:300]!r}", raw, 0)
 
 
 def _call_json(client: OpenAI, model: str, system: str, user: str) -> dict[str, Any]:
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        temperature=0.2,
-    )
+        "temperature": 0.2,
+    }
+    try:
+        response = client.chat.completions.create(
+            **kwargs,
+            response_format={"type": "json_object"},
+        )
+    except Exception:
+        response = client.chat.completions.create(**kwargs)
     raw = response.choices[0].message.content or "{}"
     return _extract_json(raw)
 
@@ -160,6 +171,17 @@ def _post_process(text: str, target_language: str) -> str:
     return cleaned
 
 
+def _looks_like_plain_translation(raw: str, target_language: str) -> bool:
+    stripped = raw.strip()
+    if not stripped or stripped.startswith("{") or "{" in stripped or "}" in stripped:
+        return False
+    if target_language == "zh" and not any("\u4e00" <= ch <= "\u9fff" for ch in stripped):
+        return False
+    if target_language == "en" and not any("a" <= ch.lower() <= "z" for ch in stripped):
+        return False
+    return True
+
+
 def translate_sentence(
     text: str,
     target_language: str,
@@ -176,6 +198,14 @@ def translate_sentence(
                 raise ValueError("empty dst")
             return _post_process(item.dst, target_language)
         except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+            raw = getattr(exc, "doc", "")
+            if raw and _looks_like_plain_translation(raw, target_language):
+                log.info(
+                    "translate attempt %d returned plain text, using directly for %r",
+                    attempt + 1,
+                    text[:60],
+                )
+                return _post_process(raw, target_language)
             last_error = exc
             log.warning("translate attempt %d failed for %r: %s", attempt + 1, text[:60], exc)
     raise RuntimeError(f"translate_sentence failed after {TRANSLATE_RETRY} attempts: {last_error}")

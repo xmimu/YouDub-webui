@@ -67,6 +67,7 @@ class PipelineRunner:
             "tts": self._tts,
             "merge_audio": self._merge_audio,
             "merge_video": self._merge_video,
+            "summary": self._summary,
         }
 
     def run(self) -> None:
@@ -441,6 +442,20 @@ class PipelineRunner:
         self.artifacts.final_video = merge_video(video_file, dubbing_file, bgm_file, timings_file, session)
         size_mb = self.artifacts.final_video.stat().st_size / (1024 * 1024)
         self.stage_message("merge_video", f"Final video: {self.artifacts.final_video} ({size_mb:.1f} MB)")
+
+    def _summary(self, task: dict) -> None:
+        from .adapters.summary import generate_summary_md, read_video_info
+
+        session = _require(self.artifacts.session, "session")
+        info = read_video_info(session)
+        if not info:
+            self.stage_message("summary", "No video metadata; skipped")
+            return
+        md_path = generate_summary_md(session, info)
+        if md_path:
+            self.stage_message("summary", f"Summary -> {md_path.name}")
+        else:
+            self.stage_message("summary", "Summary generation skipped")
 
 
 def run_task(task_id: str) -> None:
