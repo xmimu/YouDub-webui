@@ -322,6 +322,114 @@ def test_inline_video_download_and_range_requests_use_session_cookie(client, tmp
     assert ranged.headers["cache-control"] == "no-store"
 
 
+def test_channel_videos_enrichment_with_task_info(client, tmp_path):
+    login(client)
+    sub_id = database.upsert_channel_subscription(
+        "https://www.youtube.com/@enrichment", channel_name="Enrichment"
+    )
+    session = tmp_path / "session"
+    media = session / "media"
+    media.mkdir(parents=True)
+    source = media / "video_source.mp4"
+    source.write_bytes(b"source")
+    final = media / "video_final.mp4"
+    final.write_bytes(b"final")
+
+    database.replace_channel_videos(
+        sub_id,
+        [
+            {"id": "enrichvid01", "title": "Done Video", "url": "https://www.youtube.com/watch?v=enrichvid01"},
+            {"id": "enrichvid02", "title": "Fresh Video", "url": "https://www.youtube.com/watch?v=enrichvid02"},
+        ],
+    )
+    task_id = database.create_task(
+        "https://www.youtube.com/watch?v=enrichvid01", task_id="enrichvid01"
+    )
+    database.update_task(
+        task_id,
+        status="succeeded",
+        session_path=str(session),
+        final_video_path=str(final),
+    )
+
+    response = client.get(f"/api/channels/{sub_id}/videos")
+    assert response.status_code == 200
+    items = {v["id"]: v for v in response.json()["videos"]}
+
+    done = items["enrichvid01"]
+    assert done["downloaded"] is True
+    assert done["task_id"] == task_id
+    assert done["task_status"] == "succeeded"
+    assert done["session_path"] == str(session)
+    assert done["final_video_path"] == str(final)
+    assert done["has_original"] is True
+    assert done["has_final"] is True
+
+    fresh = items["enrichvid02"]
+    assert fresh["downloaded"] is False
+    assert fresh["task_id"] is None
+    assert fresh["task_status"] is None
+    assert fresh["has_original"] is False
+    assert fresh["has_final"] is False
+
+
+def test_original_video_artifact_inline_and_download(client, tmp_path):
+    login(client)
+    session = tmp_path / "session"
+    media = session / "media"
+    media.mkdir(parents=True)
+    source = media / "video_source.mp4"
+    source.write_bytes(b"0123456789")
+    task_id = database.create_task(
+        "https://www.youtube.com/watch?v=origvideo01", task_id="origvideo01"
+    )
+    database.update_task(task_id, status="succeeded", session_path=str(session))
+
+    inline = client.get(f"/api/tasks/{task_id}/artifact/original-video")
+    download = client.get(f"/api/tasks/{task_id}/artifact/original-video?download=1")
+    missing = client.get("/api/tasks/missing/artifact/original-video")
+    no_source = client.get("/api/tasks/origvideo02/artifact/original-video")
+
+    assert inline.status_code == 200
+    assert inline.content == b"0123456789"
+    assert inline.headers["content-disposition"].startswith("inline")
+    assert download.status_code == 200
+    assert download.headers["content-disposition"].startswith("attachment")
+    assert missing.status_code == 404
+    assert no_source.status_code == 404
+
+
+def test_open_task_folder_reveals_session(monkeypatch, client, tmp_path):
+    csrf_token, _ = login(client)
+    workfolder = tmp_path / "work"
+    session = workfolder / "uploader" / "title__vid"
+    session.mkdir(parents=True)
+    task_id = database.create_task(
+        "https://www.youtube.com/watch?v=folder01", task_id="folder01"
+    )
+    database.update_task(task_id, status="succeeded", session_path=str(session))
+
+    monkeypatch.setattr(main, "WORKFOLDER", workfolder)
+    revealed: list[str] = []
+    monkeypatch.setattr(
+        main,
+        "_reveal_in_file_manager",
+        lambda directory: revealed.append(str(directory)),
+    )
+
+    headers = {auth.CSRF_HEADER_NAME: csrf_token}
+    response = client.post(f"/api/tasks/{task_id}/open-folder", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["opened"] is True
+    assert revealed == [str(session)]
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    database.update_task(task_id, session_path=str(outside))
+    blocked = client.post(f"/api/tasks/{task_id}/open-folder", headers=headers)
+    assert blocked.status_code == 404
+
+
 def test_successful_login_revokes_existing_session_and_rotates_token(client):
     login(client)
     old_token = client.cookies.get(auth.SESSION_COOKIE_NAME)

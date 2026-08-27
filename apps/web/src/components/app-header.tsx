@@ -2,7 +2,7 @@
 
 import Link from "next/link"
 import { useState } from "react"
-import { ArrowLeft, Loader2, LogOut } from "lucide-react"
+import { ArrowLeft, ListVideo, Loader2, LogOut } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { SettingsDialog } from "@/components/settings-dialog"
@@ -47,6 +47,15 @@ export function AppHeader({ backHref }: { backHref?: string }) {
         </Link>
       </div>
       <div className="flex items-center gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          nativeButton={false}
+          render={<Link href="/channels" />}
+        >
+          <ListVideo className="size-4" />
+          {t.channels.title}
+        </Button>
         <SettingsDialog />
         <Button type="button" variant="outline" onClick={handleLogout} disabled={loggingOut}>
           {loggingOut ? <Loader2 className="size-4 animate-spin" /> : <LogOut className="size-4" />}

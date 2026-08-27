@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, SecretStr
 
-from . import auth, database, runtime_security, worker
+from . import auth, channel_jobs, database, runtime_security, worker
 from .adapters.local_subtitles import parse_srt, uploaded_subtitle_dir
 from .adapters.local_video import remove_upload, uploaded_video_dir
 from .adapters.openai_client import validate_openai_base_url
@@ -129,6 +129,7 @@ async def lifespan(app: FastAPI):
     database.backfill_titles_from_metadata()
     database.fail_stale_active_tasks()
     worker.start(run_task)
+    channel_jobs.start()
     yield
 
 
@@ -502,6 +503,20 @@ def _is_inside_workfolder(path: Path) -> bool:
     return True
 
 
+def _reveal_in_file_manager(directory: Path) -> None:
+    """在系统文件管理器中打开目录（仅限本机场景）。"""
+    import platform
+    import subprocess
+
+    system = platform.system()
+    if system == "Darwin":
+        subprocess.run(["open", str(directory)], check=True)
+    elif system == "Windows":
+        subprocess.run(["explorer", str(directory)], check=True)
+    else:
+        subprocess.run(["xdg-open", str(directory)], check=True)
+
+
 def _purge_task(task: dict) -> None:
     session_path = task.get("session_path")
     if session_path:
@@ -623,6 +638,42 @@ def final_video(task_id: str, download: bool = False) -> FileResponse:
     return FileResponse(final_path, media_type="video/mp4", headers=headers)
 
 
+@app.get("/api/tasks/{task_id}/artifact/original-video")
+def original_video(task_id: str, download: bool = False) -> FileResponse:
+    task = database.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    session_path = task.get("session_path")
+    if not session_path:
+        raise HTTPException(status_code=404, detail="Original video is not available.")
+    source_path = Path(session_path) / "media" / "video_source.mp4"
+    if not source_path.is_file():
+        raise HTTPException(status_code=404, detail="Original video is not available.")
+    name = source_path.name
+    if download:
+        return FileResponse(source_path, media_type="video/mp4", filename=name)
+    headers = {"Content-Disposition": f'inline; filename="{name}"'}
+    return FileResponse(source_path, media_type="video/mp4", headers=headers)
+
+
+@app.post("/api/tasks/{task_id}/open-folder", status_code=200)
+def open_task_folder(task_id: str) -> dict:
+    task = database.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    session_path = task.get("session_path")
+    if not session_path:
+        raise HTTPException(status_code=404, detail="Task folder is not available.")
+    session_dir = Path(session_path)
+    if not session_dir.is_dir() or not _is_inside_workfolder(session_dir):
+        raise HTTPException(status_code=404, detail="Task folder is not available.")
+    try:
+        _reveal_in_file_manager(session_dir)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Unable to open folder: {exc}") from exc
+    return {"opened": True, "path": str(session_dir)}
+
+
 @app.get("/api/cookies/youtube")
 def get_youtube_cookie() -> dict:
     metadata = runtime_security.private_file_stat(YOUTUBE_COOKIE_PATH)
@@ -711,3 +762,178 @@ def get_ytdlp_settings() -> dict:
 def save_ytdlp_settings(payload: YtdlpSettingsUpdate) -> dict:
     database.save_ytdlp_settings(normalize_proxy_port(payload.proxy_port))
     return get_ytdlp_settings()
+
+
+class ChannelFetchRequest(BaseModel):
+    channels: list[str]
+    limit: int = 2
+
+
+class ChannelSubscribeRequest(BaseModel):
+    url: str
+    limit: int = 2
+    group_name: str = ""
+
+
+CHANNEL_LIMIT_MIN = 1
+CHANNEL_LIMIT_MAX = 50
+CHANNELS_MAX_COUNT = 100
+
+
+@app.post("/api/channels/fetch", status_code=201)
+def fetch_channels(payload: ChannelFetchRequest) -> dict:
+    channels = [c.strip() for c in payload.channels if c.strip()]
+    if not channels:
+        raise HTTPException(status_code=422, detail="No channel URLs provided.")
+    if len(channels) > CHANNELS_MAX_COUNT:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Too many channels (max {CHANNELS_MAX_COUNT}).",
+        )
+    limit = max(CHANNEL_LIMIT_MIN, min(payload.limit, CHANNEL_LIMIT_MAX))
+    job_id = database.create_channel_job(channels, limit)
+    channel_jobs.enqueue(job_id)
+    return database.get_channel_job(job_id)
+
+
+@app.get("/api/channels/fetch/{job_id}")
+def get_channel_job(job_id: str) -> dict:
+    job = database.get_channel_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Channel job not found.")
+    return job
+
+
+@app.get("/api/channels/subscriptions")
+def list_channel_subscriptions() -> dict:
+    subscriptions = database.list_channel_subscriptions()
+    return {"subscriptions": subscriptions}
+
+
+@app.delete("/api/channels/subscriptions/{subscription_id}", status_code=204)
+def delete_channel_subscription(subscription_id: str) -> Response:
+    if not database.delete_channel_subscription(subscription_id):
+        raise HTTPException(status_code=404, detail="Channel subscription not found.")
+    return Response(status_code=204)
+
+
+@app.post("/api/channels/subscribe", status_code=201)
+def subscribe_channel(payload: ChannelSubscribeRequest) -> dict:
+    from .adapters.channels import resolve_channel_url
+
+    try:
+        channel_url, channel_name = resolve_channel_url(payload.url)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"Unable to resolve channel: {exc}") from exc
+    subscription = database.upsert_channel_subscription(
+        channel_url,
+        channel_name=channel_name,
+        group_name=payload.group_name.strip(),
+    )
+    # Kick off a background refresh to cache the channel's video list.
+    refresh_id = database.create_channel_job([channel_url], 0, kind="refresh")
+    channel_jobs.enqueue(refresh_id)
+    return database.get_channel_subscription_by_url(channel_url)
+
+
+@app.get("/api/channels/{subscription_id}/videos")
+def channel_videos(
+    subscription_id: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+) -> dict:
+    subscription = database.get_channel_subscription(subscription_id)
+    if not subscription:
+        raise HTTPException(status_code=404, detail="Channel subscription not found.")
+
+    cached = database.list_channel_videos(subscription_id)
+    enriched: list[dict] = []
+    for video in cached:
+        task: dict | None = None
+        try:
+            task_id = database.find_task_by_video_id(video["video_id"])
+            if task_id:
+                task = database.get_task_meta(task_id)
+        except Exception:  # noqa: BLE001
+            task = None
+        original_exists = False
+        final_exists = False
+        session_path = None
+        final_video_path = None
+        if task:
+            session_path = task.get("session_path")
+            final_video_path = task.get("final_video_path")
+            if session_path:
+                try:
+                    original_exists = Path(session_path, "media", "video_source.mp4").is_file()
+                except Exception:  # noqa: BLE001
+                    original_exists = False
+            if final_video_path:
+                try:
+                    final_exists = Path(final_video_path).is_file()
+                except Exception:  # noqa: BLE001
+                    final_exists = False
+        enriched.append(
+            {
+                "id": video["video_id"],
+                "title": video["video_title"],
+                "url": video["video_url"],
+                "downloaded": task is not None,
+                "task_id": task["id"] if task else None,
+                "task_status": task["status"] if task else None,
+                "session_path": session_path,
+                "final_video_path": final_video_path,
+                "has_original": original_exists,
+                "has_final": final_exists,
+            }
+        )
+
+    total = len(enriched)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    start = (page - 1) * page_size
+    page_items = enriched[start : start + page_size]
+
+    return {
+        "subscription": subscription,
+        "videos": page_items,
+        "count": len(page_items),
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+    }
+
+
+@app.post("/api/channels/{subscription_id}/refresh", status_code=202)
+def refresh_channel(subscription_id: str) -> dict:
+    subscription = database.get_channel_subscription(subscription_id)
+    if not subscription:
+        raise HTTPException(status_code=404, detail="Channel subscription not found.")
+    refresh_id = database.create_channel_job(
+        [subscription["channel_url"]], 0, kind="refresh"
+    )
+    channel_jobs.enqueue(refresh_id)
+    return {"job_id": refresh_id, "status": "queued"}
+
+
+@app.post("/api/channels/refresh-all", status_code=202)
+def refresh_all_subscriptions() -> dict:
+    subscriptions = database.list_channel_subscriptions()
+    channels = [s["channel_url"] for s in subscriptions]
+    if not channels:
+        raise HTTPException(status_code=422, detail="No subscribed channels.")
+    refresh_id = database.create_channel_job(channels, 0, kind="refresh")
+    channel_jobs.enqueue(refresh_id)
+    return {"job_id": refresh_id, "status": "queued", "total": len(channels)}
+
+
+@app.post("/api/channels/process", status_code=201)
+def process_all_subscriptions(payload: ChannelFetchRequest) -> dict:
+    subscriptions = database.list_channel_subscriptions()
+    channels = [s["channel_url"] for s in subscriptions]
+    if not channels:
+        raise HTTPException(status_code=422, detail="No subscribed channels.")
+    limit = max(CHANNEL_LIMIT_MIN, min(payload.limit, CHANNEL_LIMIT_MAX))
+    job_id = database.create_channel_job(channels, limit)
+    channel_jobs.enqueue(job_id)
+    return database.get_channel_job(job_id)

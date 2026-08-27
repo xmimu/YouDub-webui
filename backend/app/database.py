@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -90,6 +91,42 @@ def init_db() -> None:
               window_started_at TEXT NOT NULL,
               attempt_count INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS channel_jobs (
+              id TEXT PRIMARY KEY,
+              kind TEXT NOT NULL DEFAULT 'process',
+              status TEXT NOT NULL,
+              channels_json TEXT NOT NULL,
+              video_limit INTEGER NOT NULL DEFAULT 2,
+              processed INTEGER NOT NULL DEFAULT 0,
+              total INTEGER NOT NULL DEFAULT 0,
+              created_count INTEGER NOT NULL DEFAULT 0,
+              skipped_count INTEGER NOT NULL DEFAULT 0,
+              error_message TEXT,
+              created_at TEXT NOT NULL,
+              started_at TEXT,
+              completed_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS channel_subscriptions (
+              id TEXT PRIMARY KEY,
+              channel_url TEXT NOT NULL UNIQUE,
+              channel_name TEXT NOT NULL DEFAULT '',
+              channel_id TEXT NOT NULL DEFAULT '',
+              group_name TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL,
+              last_fetched_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS channel_videos (
+              subscription_id TEXT NOT NULL,
+              video_id TEXT NOT NULL,
+              video_title TEXT NOT NULL DEFAULT '',
+              video_url TEXT NOT NULL DEFAULT '',
+              fetched_at TEXT NOT NULL,
+              PRIMARY KEY (subscription_id, video_id),
+              FOREIGN KEY (subscription_id) REFERENCES channel_subscriptions(id) ON DELETE CASCADE
+            );
             """
         )
         defaults = openai_defaults()
@@ -113,6 +150,21 @@ def init_db() -> None:
         stage_columns = {row["name"] for row in conn.execute("PRAGMA table_info(task_stages)").fetchall()}
         if "progress" not in stage_columns:
             conn.execute("ALTER TABLE task_stages ADD COLUMN progress INTEGER")
+
+        channel_job_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(channel_jobs)").fetchall()
+        }
+        if "kind" not in channel_job_columns:
+            conn.execute("ALTER TABLE channel_jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'process'")
+
+        channel_sub_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(channel_subscriptions)").fetchall()
+        }
+        if "group_name" not in channel_sub_columns:
+            conn.execute(
+                "ALTER TABLE channel_subscriptions ADD COLUMN group_name TEXT NOT NULL DEFAULT ''"
+            )
 
 
 def create_auth_session(
@@ -304,6 +356,19 @@ def find_task_by_video_id(video_id: str) -> str | None:
             (video_id, f"%{video_id}%"),
         ).fetchone()
     return row["id"] if row else None
+
+
+def get_task_meta(task_id: str) -> dict[str, Any] | None:
+    """轻量任务元数据（不含 stages），用于频道视频列表富化。"""
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT id, url, status, current_stage, session_path, final_video_path
+            FROM tasks WHERE id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+    return dict(row) if row else None
 
 
 def has_active_task() -> bool:
@@ -667,3 +732,222 @@ def log_path(task_id: str) -> Path:
     if Path(DB_PATH).absolute() != Path(config.DB_PATH).absolute():
         return Path(DB_PATH).absolute().parent / "logs" / f"{task_id}.log"
     return LOG_DIR / f"{task_id}.log"
+
+
+def create_channel_job(
+    channels: list[str],
+    limit: int,
+    *,
+    job_id: str | None = None,
+    kind: str = "process",
+) -> str:
+    new_id = job_id or str(uuid.uuid4())
+    created_at = now_iso()
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO channel_jobs (
+              id, kind, status, channels_json, video_limit, created_at
+            ) VALUES (?, ?, 'queued', ?, ?, ?)
+            """,
+            (new_id, kind, json.dumps(channels), int(limit), created_at),
+        )
+    return new_id
+
+
+def get_channel_job(job_id: str) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM channel_jobs WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+    if not row:
+        return None
+    result = dict(row)
+    result["channels"] = json.loads(result.pop("channels_json", "[]"))
+    return result
+
+
+def update_channel_job(
+    job_id: str,
+    *,
+    status: str | None = None,
+    processed: int | None = None,
+    total: int | None = None,
+    created_count: int | None = None,
+    skipped_count: int | None = None,
+    error_message: str | None = None,
+    started_at: str | None = None,
+    completed_at: str | None = None,
+) -> None:
+    updates: list[str] = []
+    params: list[Any] = []
+    for column, value in (
+        ("status", status),
+        ("processed", processed),
+        ("total", total),
+        ("created_count", created_count),
+        ("skipped_count", skipped_count),
+        ("error_message", error_message),
+        ("started_at", started_at),
+        ("completed_at", completed_at),
+    ):
+        if value is not None:
+            updates.append(f"{column} = ?")
+            params.append(value)
+    if not updates:
+        return
+    params.append(job_id)
+    with connect() as conn:
+        conn.execute(
+            f"UPDATE channel_jobs SET {', '.join(updates)} WHERE id = ?",
+            params,
+        )
+
+
+def upsert_channel_subscription(
+    channel_url: str,
+    *,
+    channel_name: str = "",
+    channel_id: str = "",
+    last_fetched_at: str | None = None,
+    group_name: str = "",
+) -> str:
+    """保存/更新频道订阅，返回订阅 id。"""
+    existing = get_channel_subscription_by_url(channel_url)
+    now = last_fetched_at or now_iso()
+    if existing:
+        with connect() as conn:
+            conn.execute(
+                """
+                UPDATE channel_subscriptions
+                SET channel_name = COALESCE(NULLIF(?, ''), channel_name),
+                    channel_id = COALESCE(NULLIF(?, ''), channel_id),
+                    group_name = COALESCE(NULLIF(?, ''), group_name),
+                    last_fetched_at = ?
+                WHERE id = ?
+                """,
+                (channel_name, channel_id, group_name, now, existing["id"]),
+            )
+        return existing["id"]
+    new_id = str(uuid.uuid4())
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO channel_subscriptions (
+              id, channel_url, channel_name, channel_id, group_name, created_at, last_fetched_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (new_id, channel_url, channel_name, channel_id, group_name, now, now),
+        )
+    return new_id
+
+
+def get_channel_subscription_by_url(channel_url: str) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM channel_subscriptions WHERE channel_url = ?",
+            (channel_url,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_channel_subscription(subscription_id: str) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM channel_subscriptions WHERE id = ?",
+            (subscription_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_channel_subscriptions() -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM channel_subscriptions
+            ORDER BY
+              CASE WHEN group_name = '' THEN 1 ELSE 0 END,
+              group_name ASC,
+              created_at DESC,
+              rowid DESC
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_channel_groups() -> list[dict[str, Any]]:
+    """列出所有分组及其频道数量，默认分组（group_name 为空）排在最前。"""
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT group_name AS name,
+                   COUNT(*) AS channel_count
+            FROM channel_subscriptions
+            GROUP BY group_name
+            ORDER BY
+              CASE WHEN group_name = '' THEN 1 ELSE 0 END,
+              group_name ASC
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def delete_channel_subscription(subscription_id: str) -> bool:
+    with connect() as conn:
+        cur = conn.execute(
+            "DELETE FROM channel_subscriptions WHERE id = ?",
+            (subscription_id,),
+        )
+    return cur.rowcount > 0
+
+
+def replace_channel_videos(subscription_id: str, videos: list[dict[str, Any]]) -> None:
+    """整体替换某频道的视频缓存，保留视频顺序（频道页最新在前）。"""
+    now = now_iso()
+    with connect() as conn:
+        conn.execute(
+            "DELETE FROM channel_videos WHERE subscription_id = ?",
+            (subscription_id,),
+        )
+        conn.executemany(
+            """
+            INSERT OR REPLACE INTO channel_videos (
+              subscription_id, video_id, video_title, video_url, fetched_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    subscription_id,
+                    str(video.get("id") or ""),
+                    str(video.get("title") or ""),
+                    str(video.get("url") or ""),
+                    now,
+                )
+                for video in videos
+                if video.get("id")
+            ],
+        )
+
+
+def list_channel_videos(subscription_id: str) -> list[dict[str, Any]]:
+    """按频道页顺序返回某频道的视频缓存。"""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM channel_videos WHERE subscription_id = ? ORDER BY rowid",
+            (subscription_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def count_channel_videos(subscription_id: str) -> int:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM channel_videos WHERE subscription_id = ?",
+            (subscription_id,),
+        ).fetchone()
+    return int(row["n"]) if row else 0
+
+
+def has_channel_videos_cache(subscription_id: str) -> bool:
+    return count_channel_videos(subscription_id) > 0

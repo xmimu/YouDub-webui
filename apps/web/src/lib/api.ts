@@ -379,3 +379,133 @@ export function finalVideoUrl(taskId: string) {
 export function finalVideoDownloadUrl(taskId: string) {
   return `/api/tasks/${taskId}/artifact/final-video?download=1`
 }
+
+export function originalVideoUrl(taskId: string) {
+  return `/api/tasks/${taskId}/artifact/original-video`
+}
+
+export function originalVideoDownloadUrl(taskId: string) {
+  return `/api/tasks/${taskId}/artifact/original-video?download=1`
+}
+
+export function openTaskFolder(taskId: string) {
+  return request<{ opened: boolean; path: string }>(
+    `/api/tasks/${taskId}/open-folder`,
+    { method: "POST" },
+  )
+}
+
+export type ChannelJobStatus = "queued" | "running" | "succeeded" | "failed"
+
+export type ChannelJob = {
+  id: string
+  status: ChannelJobStatus
+  channels: string[]
+  video_limit: number
+  processed: number
+  total: number
+  created_count: number
+  skipped_count: number
+  error_message: string | null
+  created_at: string
+  started_at: string | null
+  completed_at: string | null
+}
+
+export function fetchChannels(channels: string[], limit: number) {
+  return request<ChannelJob>("/api/channels/fetch", {
+    method: "POST",
+    body: JSON.stringify({ channels, limit }),
+  })
+}
+
+export function getChannelJob(jobId: string) {
+  return request<ChannelJob>(`/api/channels/fetch/${jobId}`)
+}
+
+export type ChannelSubscription = {
+  id: string
+  channel_url: string
+  channel_name: string
+  channel_id: string
+  group_name: string
+  created_at: string
+  last_fetched_at: string | null
+}
+
+export function listChannelSubscriptions(signal?: AbortSignal) {
+  return request<{ subscriptions: ChannelSubscription[] }>(
+    "/api/channels/subscriptions",
+    signal ? { signal } : undefined,
+  )
+}
+
+export function deleteChannelSubscription(subscriptionId: string) {
+  return request<void>(`/api/channels/subscriptions/${subscriptionId}`, {
+    method: "DELETE",
+  })
+}
+
+export function subscribeChannel(url: string, groupName: string = "") {
+  return request<ChannelSubscription>("/api/channels/subscribe", {
+    method: "POST",
+    body: JSON.stringify({ url, group_name: groupName }),
+  })
+}
+
+export type ChannelVideo = {
+  id: string
+  title: string
+  url: string
+  downloaded: boolean
+  task_id: string | null
+  task_status: string | null
+  session_path: string | null
+  final_video_path: string | null
+  has_original: boolean
+  has_final: boolean
+}
+
+export type ChannelVideosResponse = {
+  subscription: ChannelSubscription
+  videos: ChannelVideo[]
+  count: number
+  total: number
+  page: number
+  page_size: number
+  total_pages: number
+}
+
+export function getChannelVideos(
+  subscriptionId: string,
+  page: number = 1,
+  pageSize: number = 20,
+  signal?: AbortSignal,
+) {
+  const query = `?page=${page}&page_size=${pageSize}`
+  return request<ChannelVideosResponse>(
+    `/api/channels/${subscriptionId}/videos${query}`,
+    signal ? { signal } : undefined,
+  )
+}
+
+export function processAllSubscriptions(limit: number = 2) {
+  return request<ChannelJob>("/api/channels/process", {
+    method: "POST",
+    body: JSON.stringify({ channels: [], limit }),
+  })
+}
+
+export function refreshChannel(subscriptionId: string) {
+  return request<{ job_id: string; status: string }>(
+    `/api/channels/${subscriptionId}/refresh`,
+    { method: "POST" },
+  )
+}
+
+export function refreshAllSubscriptions() {
+  return request<{ job_id: string; status: string; total: number }>(
+    "/api/channels/refresh-all",
+    { method: "POST" },
+  )
+}
