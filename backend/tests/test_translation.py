@@ -237,7 +237,17 @@ def test_translate_sentence_raises_after_retries(monkeypatch):
     monkeypatch.setattr(openai_translate, "_call_json", fake_call_json)
 
     with pytest.raises(RuntimeError, match="translate_sentence failed"):
-        openai_translate.translate_sentence("x", "en", object(), "m", "sys")
+        openai_translate.translate_sentence("", "en", object(), "m", "sys")
+
+
+def test_translate_sentence_falls_back_to_source_after_retries(monkeypatch):
+    def fake_call_json(client, model, system, user):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(openai_translate, "_call_json", fake_call_json)
+
+    result = openai_translate.translate_sentence("keep me", "zh", object(), "m", "sys")
+    assert result == "keep me"
 
 
 def test_preprocess_returns_empty_when_repeatedly_invalid(monkeypatch):

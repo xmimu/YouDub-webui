@@ -208,6 +208,12 @@ def translate_sentence(
                 return _post_process(raw, target_language)
             last_error = exc
             log.warning("translate attempt %d failed for %r: %s", attempt + 1, text[:60], exc)
+    if text.strip():
+        log.warning(
+            "translate_sentence exhausted retries for %r, falling back to source text",
+            text[:60],
+        )
+        return text.strip()
     raise RuntimeError(f"translate_sentence failed after {TRANSLATE_RETRY} attempts: {last_error}")
 
 
