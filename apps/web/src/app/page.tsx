@@ -33,7 +33,6 @@ import {
 } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   Select,
   SelectContent,
@@ -93,6 +92,7 @@ export default function Home() {
   const [localSubtitleFile, setLocalSubtitleFile] = useState<File | null>(null)
   const [localDirection, setLocalDirection] = useState<LocalDirection>("en-zh")
   const [executionMode, setExecutionMode] = useState<ExecutionMode>("auto")
+  const [autoUploadBilibili, setAutoUploadBilibili] = useState(false)
   const [tasks, setTasks] = useState<TaskSummary[]>([])
   const [taskTotal, setTaskTotal] = useState(0)
   const [activeTaskCount, setActiveTaskCount] = useState<number | null>(null)
@@ -199,6 +199,7 @@ export default function Home() {
   function selectLocalFile(event: ChangeEvent<HTMLInputElement>) {
     setError("")
     setLocalFile(event.target.files?.[0] || null)
+    if (event.target.files?.[0]) setAutoUploadBilibili(false)
     setLocalSubtitleFile(null)
     if (subtitleInputRef.current) {
       subtitleInputRef.current.value = ""
@@ -219,11 +220,12 @@ export default function Home() {
     try {
       const created = localFile
         ? await uploadLocalTask(localFile, localDirection, localSubtitleFile, executionMode)
-        : await createTask(submittedUrl, executionMode)
+        : await createTask(submittedUrl, executionMode, autoUploadBilibili)
       setYoutubeUrl("")
       setBilibiliUrl("")
       setLocalFile(null)
       setLocalSubtitleFile(null)
+      setAutoUploadBilibili(false)
       if (fileInputRef.current) {
         fileInputRef.current.value = ""
       }
@@ -362,6 +364,22 @@ export default function Home() {
                     ))}
                   </SelectContent>
                 </Select>
+              </div>
+              <div className="flex items-start gap-3 rounded-lg border border-border/60 bg-muted/20 px-3 py-3">
+                <input
+                  id="auto-upload-bilibili"
+                  type="checkbox"
+                  checked={autoUploadBilibili}
+                  disabled={hasLocalFile}
+                  onChange={(event) => setAutoUploadBilibili(event.target.checked)}
+                  className="mt-0.5 size-4 accent-[#00aeec]"
+                />
+                <div className="grid gap-1">
+                  <Label htmlFor="auto-upload-bilibili">{t.home.autoUploadBilibili}</Label>
+                  <p className="text-xs text-muted-foreground">
+                    {hasLocalFile ? t.home.localUploadBilibiliDisabled : t.home.autoUploadBilibiliHelp}
+                  </p>
+                </div>
               </div>
               <div className="flex items-center justify-between gap-3">
                 {activeTaskCount !== null && activeTaskCount > 0 ? (
@@ -527,35 +545,33 @@ export default function Home() {
                 {hasTaskFilters ? t.home.noMatchingTasks : t.home.empty}
               </div>
             ) : (
-              <ScrollArea className="max-h-[56dvh] overflow-hidden">
-                <ul className="flex flex-col">
-                  {tasks.map((item) => (
-                    <li key={item.id} className="border-b border-border/60 last:border-b-0">
-                      <Link
-                        href={`/tasks/${item.id}`}
-                        className="flex w-full items-center gap-3 px-6 py-3 text-sm transition-colors hover:bg-muted/60"
-                      >
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-left font-medium text-zinc-900">
-                            {item.title || shortUrl(item.url)}
-                          </p>
-                          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-                            <Badge className={statusBadgeClass(item.status)}>{statusLabel(item.status)}</Badge>
-                            <span>{formatTime(item.created_at)}</span>
-                            {isActive(item.status) && item.current_stage ? (
-                              <span>· {stageLabel(item.current_stage)}</span>
-                            ) : null}
-                            {isAwaitingAction(item.status) ? (
-                              <span>· {t.status.paused}</span>
-                            ) : null}
-                          </div>
+              <ul className="flex flex-col">
+                {tasks.map((item) => (
+                  <li key={item.id} className="border-b border-border/60 last:border-b-0">
+                    <Link
+                      href={`/tasks/${item.id}`}
+                      className="flex w-full items-center gap-3 px-6 py-3 text-sm transition-colors hover:bg-muted/60"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-left font-medium text-zinc-900">
+                          {item.title || shortUrl(item.url)}
+                        </p>
+                        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                          <Badge className={statusBadgeClass(item.status)}>{statusLabel(item.status)}</Badge>
+                          <span>{formatTime(item.created_at)}</span>
+                          {isActive(item.status) && item.current_stage ? (
+                            <span>· {stageLabel(item.current_stage)}</span>
+                          ) : null}
+                          {isAwaitingAction(item.status) ? (
+                            <span>· {t.status.paused}</span>
+                          ) : null}
                         </div>
-                        <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
-                      </Link>
-                    </li>
-                  ))}
-                </ul>
-              </ScrollArea>
+                      </div>
+                      <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
+                    </Link>
+                  </li>
+                ))}
+              </ul>
             )}
 
             {taskTotal > 0 ? (

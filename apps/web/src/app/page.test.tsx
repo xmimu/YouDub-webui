@@ -95,6 +95,45 @@ describe("本地视频字幕选择", () => {
   })
 })
 
+describe("Bilibili 自动投稿", () => {
+  it("创建 URL 任务时发送任务级自动投稿选项", async () => {
+    mocks.fetch.mockReset()
+    mocks.fetch.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === "/api/tasks" && init?.method === "POST") {
+        return new Response(JSON.stringify({ id: "auto-upload-task" }), {
+          status: 201,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      if (path.startsWith("/api/tasks")) {
+        return new Response(JSON.stringify({
+          tasks: [], total: 0, active_count: 0, page: 1, page_size: 20,
+        }), { status: 200, headers: { "Content-Type": "application/json" } })
+      }
+      throw new Error(`未预期的请求: ${path}`)
+    })
+    vi.stubGlobal("fetch", mocks.fetch)
+    const user = userEvent.setup()
+    render(<LanguageProvider><Home /></LanguageProvider>)
+
+    await user.type(
+      screen.getByLabelText("YouTube 链接（英文 -> 中文）"),
+      "https://www.youtube.com/watch?v=abcdefghijk",
+    )
+    await user.click(screen.getByLabelText("完成后自动投稿到 Bilibili"))
+    await user.click(screen.getByRole("button", { name: "创建任务" }))
+
+    const createCall = mocks.fetch.mock.calls.find(
+      ([input, init]) => String(input) === "/api/tasks" && init?.method === "POST",
+    )
+    expect(JSON.parse(String(createCall?.[1]?.body))).toMatchObject({
+      auto_upload_bilibili: true,
+      execution_mode: "auto",
+    })
+  })
+})
+
 describe("任务列表轮询", () => {
   it("筛选变化后丢弃已取消请求的迟到响应", async () => {
     let resolveOldRequest!: (response: Response) => void

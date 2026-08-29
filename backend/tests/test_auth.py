@@ -338,8 +338,18 @@ def test_channel_videos_enrichment_with_task_info(client, tmp_path):
     database.replace_channel_videos(
         sub_id,
         [
-            {"id": "enrichvid01", "title": "Done Video", "url": "https://www.youtube.com/watch?v=enrichvid01"},
-            {"id": "enrichvid02", "title": "Fresh Video", "url": "https://www.youtube.com/watch?v=enrichvid02"},
+            {
+                "id": "enrichvid01",
+                "title": "Done Video",
+                "url": "https://www.youtube.com/watch?v=enrichvid01",
+                "view_count": 12345,
+            },
+            {
+                "id": "enrichvid02",
+                "title": "Fresh Video",
+                "url": "https://www.youtube.com/watch?v=enrichvid02",
+                "view_count": 67890,
+            },
         ],
     )
     task_id = database.create_task(
@@ -364,6 +374,7 @@ def test_channel_videos_enrichment_with_task_info(client, tmp_path):
     assert done["final_video_path"] == str(final)
     assert done["has_original"] is True
     assert done["has_final"] is True
+    assert done["view_count"] == 12345
 
     fresh = items["enrichvid02"]
     assert fresh["downloaded"] is False
@@ -371,6 +382,31 @@ def test_channel_videos_enrichment_with_task_info(client, tmp_path):
     assert fresh["task_status"] is None
     assert fresh["has_original"] is False
     assert fresh["has_final"] is False
+    assert fresh["view_count"] == 67890
+
+
+def test_channel_videos_sorts_by_views_and_default_order(client):
+    login(client)
+    sub_id = database.upsert_channel_subscription(
+        "https://www.youtube.com/@sorting", channel_name="Sorting"
+    )
+    database.replace_channel_videos(
+        sub_id,
+        [
+            {"id": "sortvid01", "title": "Oldest", "url": "https://www.youtube.com/watch?v=sortvid01", "view_count": 100},
+            {"id": "sortvid02", "title": "Middle", "url": "https://www.youtube.com/watch?v=sortvid02", "view_count": 200},
+            {"id": "sortvid03", "title": "Newest", "url": "https://www.youtube.com/watch?v=sortvid03", "view_count": 50},
+        ],
+    )
+
+    default = client.get(f"/api/channels/{sub_id}/videos")
+    assert [v["id"] for v in default.json()["videos"]] == ["sortvid01", "sortvid02", "sortvid03"]
+
+    by_newest = client.get(f"/api/channels/{sub_id}/videos", params={"sort": "date"})
+    assert [v["id"] for v in by_newest.json()["videos"]] == ["sortvid01", "sortvid02", "sortvid03"]
+
+    by_views = client.get(f"/api/channels/{sub_id}/videos", params={"sort": "views"})
+    assert [v["id"] for v in by_views.json()["videos"]] == ["sortvid02", "sortvid01", "sortvid03"]
 
 
 def test_original_video_artifact_inline_and_download(client, tmp_path):

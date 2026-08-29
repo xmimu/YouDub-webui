@@ -21,3 +21,5 @@ audiostretchy
 numpy
 pytest
 httpx[socks]
+Pillow
+biliup==1.2.4

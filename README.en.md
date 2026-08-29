@@ -242,6 +242,8 @@ Common environment variables:
 | `YTDLP_PROXY_PORT` | Local proxy port used by yt-dlp, for example `7890`. |
 | `HTTP_PROXY` / `ALL_PROXY` | yt-dlp reads `HTTP_PROXY` when no UI proxy port is set; HTTPX/OpenAI SDK also reads these environment proxies. |
 | `NO_PROXY` | Comma-separated proxy bypass list. Include `localhost,127.0.0.1,::1` when using a local OpenAI-compatible service so local requests stay direct. |
+| `BILIBILI_DEFAULT_TID` | Optional default numeric Bilibili category ID; it can also be configured in Settings. |
+| `BILIUP_UPLOAD_TIMEOUT_SECONDS` | Maximum runtime for one biliup submission process. Default: `86400` seconds (24 hours). |
 | `VOXCPM_MODEL` / `VOXCPM_MODEL_DIR` | VoxCPM2 ModelScope model ID or local model directory. VoxCPM currently selects CUDA/MPS/CPU inside the upstream package, and task logs report it as `voxcpm=library-auto`. |
 | `VOXCPM_LOAD_DENOISER` / `VOXCPM_CFG_VALUE` / `VOXCPM_INFERENCE_TIMESTEPS` / `VOXCPM_MIN_REFERENCE_MS` | VoxCPM2 inference controls. |
 | `CORS_ALLOW_ORIGINS` / `CORS_ALLOW_ORIGIN_REGEX` | Explicitly trusted cross-origin frontends; `*` is not allowed. Same-origin Next proxying needs no entry. |
@@ -322,6 +324,16 @@ On Windows, `chmod` and `umask` are not substitutes for NTFS ACLs. Restrict the 
    - Local videos can include an already translated `.srt` file. When provided, YouDub skips Whisper and OpenAI translation, then uses that subtitle file for TTS and burned subtitles.
    - The translation direction determines the subtitle target language. For example, `English -> Chinese` treats the uploaded SRT as Chinese subtitles.
 8. Open the task detail page to watch stage progress, logs, and the final video.
+
+### Uploading to Bilibili
+
+1. Open Settings, start Bilibili QR login, and confirm it in the Bilibili mobile app.
+2. Enter the numeric default category `tid` and save. Credentials remain in the owner-only local file `data/cookies/bilibili.json` and are never returned to the browser.
+3. Enable automatic upload while creating a URL task, or upload manually from a completed task. Channel batch and individual channel tasks support the same option.
+4. The summary stage generates the title, description, and tags. Submissions use the repost type and the original video URL as their source. It also generates a cover with a Chinese title by taking a frame from the source video and cropping it to 3:4.
+5. On Linux, install a CJK font such as `Noto Sans CJK` to enable Chinese covers; macOS and Windows usually ship one.
+
+Local-file tasks cannot be submitted because they have no verifiable public source URL. A task can have only one successful submission. Preflight failures can be retried, while a timeout, exception, or restart after uploading begins is marked as an unknown outcome. Verify Bilibili Creator Center manually in that case; YouDub will not retry and risk a duplicate submission.
 
 API keys and cookies are masked in the UI. The backend does not return plaintext cookie content to the frontend.
 

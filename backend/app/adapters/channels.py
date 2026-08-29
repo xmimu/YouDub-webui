@@ -79,8 +79,18 @@ def fetch_channel_info(channel_url: str) -> dict[str, str]:
     }
 
 
-def fetch_channel_videos(channel_url: str, limit: int | None = None) -> list[dict[str, str]]:
-    """抓取频道视频列表（flat 模式）。limit 为空时抓取全部。"""
+def _parse_view_count(entry: dict[str, Any]) -> int | None:
+    value = entry.get("view_count")
+    if isinstance(value, int) and value >= 0:
+        return value
+    return None
+
+
+def fetch_channel_videos(channel_url: str, limit: int | None = None) -> list[dict[str, Any]]:
+    """抓取频道视频列表（flat 模式），保持频道页顺序（最新在前）。
+
+    limit 为空时抓取全部。发布日期不可靠获取，不做抓取。
+    """
     url = _normalize_channel_url(channel_url)
     proxy = _proxy_url()
     opts = _ydl_opts(proxy)
@@ -92,7 +102,7 @@ def fetch_channel_videos(channel_url: str, limit: int | None = None) -> list[dic
         opts.pop("playlistend", None)
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
-    videos: list[dict[str, str]] = []
+    videos: list[dict[str, Any]] = []
     for entry in info.get("entries") or []:
         if not entry or entry.get("_type") not in (None, "url", "video"):
             continue
@@ -104,6 +114,7 @@ def fetch_channel_videos(channel_url: str, limit: int | None = None) -> list[dic
                 "id": str(entry.get("id") or ""),
                 "title": str(entry.get("title") or ""),
                 "url": video_url,
+                "view_count": _parse_view_count(entry),
             }
         )
     return videos

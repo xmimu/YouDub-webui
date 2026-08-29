@@ -51,6 +51,7 @@ export default function ChannelsPage() {
   const [subscribeInput, setSubscribeInput] = useState("")
   const [groupInput, setGroupInput] = useState("")
   const [limit, setLimit] = useState(2)
+  const [autoUploadBilibili, setAutoUploadBilibili] = useState(false)
   const [job, setJob] = useState<ChannelJob | null>(null)
   const [refreshJob, setRefreshJob] = useState<ChannelJob | null>(null)
   const [subscriptions, setSubscriptions] = useState<ChannelSubscription[]>([])
@@ -106,14 +107,14 @@ export default function ChannelsPage() {
     setError("")
     setJob(null)
     try {
-      const created = await processAllSubscriptions(limit)
+      const created = await processAllSubscriptions(limit, autoUploadBilibili)
       setJob(created)
     } catch (err) {
       setError(err instanceof Error ? err.message : t.channels.error)
     } finally {
       setProcessingAll(false)
     }
-  }, [limit, processingAll, isActive, t])
+  }, [limit, autoUploadBilibili, processingAll, isActive, t])
 
   const refreshAll = useCallback(async () => {
     if (refreshingAll || isRefreshActive) return
@@ -135,6 +136,7 @@ export default function ChannelsPage() {
         created_at: "",
         started_at: null,
         completed_at: null,
+        auto_upload_bilibili: false,
       }
       setRefreshJob(placeholder)
     } catch (err) {
@@ -281,6 +283,18 @@ export default function ChannelsPage() {
                 className="max-w-[10rem]"
               />
             </div>
+            <label className="flex items-start gap-3 rounded-lg border border-border/60 bg-muted/20 px-3 py-3 text-sm">
+              <input
+                type="checkbox"
+                checked={autoUploadBilibili}
+                onChange={(event) => setAutoUploadBilibili(event.target.checked)}
+                className="mt-0.5 size-4 accent-[#00aeec]"
+              />
+              <span>
+                <span className="block font-medium">{t.home.autoUploadBilibili}</span>
+                <span className="block text-xs text-muted-foreground">{t.home.autoUploadBilibiliHelp}</span>
+              </span>
+            </label>
             <Button
               type="button"
               variant="outline"

@@ -225,3 +225,39 @@ def test_fetch_channel_videos_all_and_limited(monkeypatch):
 
     limited = channels_adapter.fetch_channel_videos("https://www.youtube.com/@X", limit=5)
     assert len(limited) == 2
+
+
+def test_fetch_channel_videos_extracts_view_count(monkeypatch):
+    fake_entries = [
+        {
+            "_type": "url",
+            "id": "viewvid01",
+            "title": "With views",
+            "url": "https://www.youtube.com/watch?v=viewvid01",
+            "view_count": 12345,
+        },
+        {
+            "_type": "url",
+            "id": "viewvid02",
+            "title": "Zero views",
+            "url": "https://www.youtube.com/watch?v=viewvid02",
+            "view_count": 0,
+        },
+        {
+            "_type": "url",
+            "id": "viewvid03",
+            "title": "Missing metadata",
+            "url": "https://www.youtube.com/watch?v=viewvid03",
+        },
+    ]
+
+    def fake_extract(self, url, download=False):
+        return {"entries": fake_entries}
+
+    monkeypatch.setattr(channels_adapter.yt_dlp.YoutubeDL, "extract_info", fake_extract)
+
+    videos = channels_adapter.fetch_channel_videos("https://www.youtube.com/@X")
+    assert videos[0]["view_count"] == 12345
+    assert videos[1]["view_count"] == 0
+    assert videos[2]["view_count"] is None
+    assert "published_at" not in videos[0]

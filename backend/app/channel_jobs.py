@@ -30,12 +30,16 @@ def enqueue(job_id: str) -> None:
     _queue.put(job_id)
 
 
-def _create_task_for_video(video_url: str) -> str:
+def _create_task_for_video(video_url: str, *, auto_upload_bilibili: bool = False) -> str:
     validated = validate_video_url(video_url)
     existing_id = database.find_task_by_video_id(validated.video_id)
     if existing_id:
         return "skipped"
-    task_id = database.create_task(validated.url, task_id=validated.video_id)
+    task_id = database.create_task(
+        validated.url,
+        task_id=validated.video_id,
+        auto_upload_bilibili=auto_upload_bilibili,
+    )
     worker.enqueue(task_id)
     return "created"
 
@@ -132,7 +136,13 @@ def _run_process_job(job_id: str) -> None:
                 if not video_url:
                     continue
                 try:
-                    outcome = _create_task_for_video(video_url)
+                    if job.get("auto_upload_bilibili"):
+                        outcome = _create_task_for_video(
+                            video_url,
+                            auto_upload_bilibili=True,
+                        )
+                    else:
+                        outcome = _create_task_for_video(video_url)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("video %s create failed: %s", video_url, exc)
                     continue

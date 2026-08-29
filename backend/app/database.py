@@ -8,7 +8,13 @@ from pathlib import Path
 from typing import Any
 
 from . import config, runtime_security
-from .config import DB_PATH, ensure_runtime_dirs, openai_defaults, ytdlp_defaults
+from .config import (
+    DB_PATH,
+    bilibili_defaults,
+    ensure_runtime_dirs,
+    openai_defaults,
+    ytdlp_defaults,
+)
 from .stages import STAGES
 
 
@@ -53,7 +59,8 @@ def init_db() -> None:
               created_at TEXT NOT NULL,
               started_at TEXT,
               completed_at TEXT,
-              execution_mode TEXT NOT NULL DEFAULT 'auto'
+              execution_mode TEXT NOT NULL DEFAULT 'auto',
+              auto_upload_bilibili INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS task_stages (
@@ -105,7 +112,8 @@ def init_db() -> None:
               error_message TEXT,
               created_at TEXT NOT NULL,
               started_at TEXT,
-              completed_at TEXT
+              completed_at TEXT,
+              auto_upload_bilibili INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS channel_subscriptions (
@@ -123,10 +131,33 @@ def init_db() -> None:
               video_id TEXT NOT NULL,
               video_title TEXT NOT NULL DEFAULT '',
               video_url TEXT NOT NULL DEFAULT '',
+              view_count INTEGER,
+              published_at TEXT,
               fetched_at TEXT NOT NULL,
               PRIMARY KEY (subscription_id, video_id),
               FOREIGN KEY (subscription_id) REFERENCES channel_subscriptions(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS bilibili_upload_jobs (
+              id TEXT PRIMARY KEY,
+              task_id TEXT NOT NULL,
+              status TEXT NOT NULL,
+              title TEXT NOT NULL,
+              description TEXT NOT NULL DEFAULT '',
+              tags_json TEXT NOT NULL DEFAULT '[]',
+              tid INTEGER NOT NULL,
+              source_url TEXT NOT NULL,
+              cover_path TEXT,
+              result_message TEXT,
+              error_message TEXT,
+              created_at TEXT NOT NULL,
+              started_at TEXT,
+              completed_at TEXT,
+              FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_bilibili_upload_jobs_task
+            ON bilibili_upload_jobs(task_id, created_at DESC);
             """
         )
         defaults = openai_defaults()
@@ -140,12 +171,21 @@ def init_db() -> None:
                 "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
                 (f"ytdlp.{key}", value, now_iso()),
             )
+        for key, value in bilibili_defaults().items():
+            conn.execute(
+                "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+                (f"bilibili.{key}", value, now_iso()),
+            )
         task_columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
         if "title" not in task_columns:
             conn.execute("ALTER TABLE tasks ADD COLUMN title TEXT")
         if "execution_mode" not in task_columns:
             conn.execute(
                 "ALTER TABLE tasks ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'auto'"
+            )
+        if "auto_upload_bilibili" not in task_columns:
+            conn.execute(
+                "ALTER TABLE tasks ADD COLUMN auto_upload_bilibili INTEGER NOT NULL DEFAULT 0"
             )
         stage_columns = {row["name"] for row in conn.execute("PRAGMA table_info(task_stages)").fetchall()}
         if "progress" not in stage_columns:
@@ -156,6 +196,10 @@ def init_db() -> None:
         }
         if "kind" not in channel_job_columns:
             conn.execute("ALTER TABLE channel_jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'process'")
+        if "auto_upload_bilibili" not in channel_job_columns:
+            conn.execute(
+                "ALTER TABLE channel_jobs ADD COLUMN auto_upload_bilibili INTEGER NOT NULL DEFAULT 0"
+            )
 
         channel_sub_columns = {
             row["name"]
@@ -165,6 +209,21 @@ def init_db() -> None:
             conn.execute(
                 "ALTER TABLE channel_subscriptions ADD COLUMN group_name TEXT NOT NULL DEFAULT ''"
             )
+
+        channel_video_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(channel_videos)").fetchall()
+        }
+        if "view_count" not in channel_video_columns:
+            conn.execute("ALTER TABLE channel_videos ADD COLUMN view_count INTEGER")
+        if "published_at" not in channel_video_columns:
+            conn.execute("ALTER TABLE channel_videos ADD COLUMN published_at TEXT")
+
+        upload_job_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(bilibili_upload_jobs)").fetchall()
+        }
+        if "cover_path" not in upload_job_columns:
+            conn.execute("ALTER TABLE bilibili_upload_jobs ADD COLUMN cover_path TEXT")
 
 
 def create_auth_session(
@@ -326,6 +385,7 @@ def create_task(
     task_id: str | None = None,
     *,
     execution_mode: str = DEFAULT_EXECUTION_MODE,
+    auto_upload_bilibili: bool = False,
 ) -> str:
     new_id = task_id or str(uuid.uuid4())
     created_at = now_iso()
@@ -333,10 +393,11 @@ def create_task(
     with connect() as conn:
         conn.execute(
             """
-            INSERT INTO tasks (id, url, status, current_stage, created_at, execution_mode)
-            VALUES (?, ?, 'queued', ?, ?, ?)
+            INSERT INTO tasks (
+              id, url, status, current_stage, created_at, execution_mode, auto_upload_bilibili
+            ) VALUES (?, ?, 'queued', ?, ?, ?, ?)
             """,
-            (new_id, url, STAGES[0].name, created_at, mode),
+            (new_id, url, STAGES[0].name, created_at, mode, int(auto_upload_bilibili)),
         )
         conn.executemany(
             """
@@ -368,7 +429,7 @@ def get_task_meta(task_id: str) -> dict[str, Any] | None:
             """,
             (task_id,),
         ).fetchone()
-    return dict(row) if row else None
+    return _task_dict(row) if row else None
 
 
 def has_active_task() -> bool:
@@ -388,8 +449,15 @@ def latest_task_id() -> str | None:
 
 TASK_SUMMARY_COLUMNS = (
     "id, url, title, status, current_stage, final_video_path, error_message, "
-    "created_at, started_at, completed_at, execution_mode"
+    "created_at, started_at, completed_at, execution_mode, auto_upload_bilibili"
 )
+
+
+def _task_dict(row: sqlite3.Row) -> dict[str, Any]:
+    result = dict(row)
+    if "auto_upload_bilibili" in result:
+        result["auto_upload_bilibili"] = bool(result["auto_upload_bilibili"])
+    return result
 
 TASK_LIST_SORTS = {
     "created_desc": "created_at DESC, rowid DESC",
@@ -428,7 +496,7 @@ def list_tasks(limit: int = 100) -> list[dict[str, Any]]:
             "ORDER BY created_at DESC, rowid DESC LIMIT ?",
             (limit,),
         ).fetchall()
-    return [dict(row) for row in rows]
+    return [_task_dict(row) for row in rows]
 
 
 def list_tasks_page(
@@ -480,7 +548,7 @@ def list_tasks_page(
         ).fetchall()
 
     return {
-        "tasks": [dict(row) for row in rows],
+        "tasks": [_task_dict(row) for row in rows],
         "total": counts["filtered_total"],
         "active_count": counts["active_count"],
         "page": page,
@@ -513,7 +581,7 @@ def get_task(task_id: str) -> dict[str, Any] | None:
             """,
             (task_id,),
         ).fetchall()
-    result = dict(task)
+    result = _task_dict(task)
     result["stages"] = [dict(stage) for stage in stages]
     return result
 
@@ -523,8 +591,10 @@ def get_current_task() -> dict[str, Any] | None:
     return get_task(task_id) if task_id else None
 
 
-def delete_task(task_id: str) -> bool:
+def delete_task(task_id: str, *, delete_upload_jobs: bool = True) -> bool:
     with connect() as conn:
+        if delete_upload_jobs:
+            conn.execute("DELETE FROM bilibili_upload_jobs WHERE task_id = ?", (task_id,))
         cursor = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
         conn.execute("DELETE FROM task_stages WHERE task_id = ?", (task_id,))
         return cursor.rowcount > 0
@@ -726,6 +796,130 @@ def save_ytdlp_settings(proxy_port: str) -> None:
     set_setting("ytdlp.proxy_port", proxy_port.strip())
 
 
+def get_bilibili_settings() -> dict[str, str]:
+    defaults = bilibili_defaults()
+    return {
+        "default_tid": get_setting("bilibili.default_tid", defaults["default_tid"]),
+    }
+
+
+def save_bilibili_settings(default_tid: str) -> None:
+    set_setting("bilibili.default_tid", default_tid.strip())
+
+
+def create_bilibili_upload_job(
+    task_id: str,
+    *,
+    title: str,
+    description: str,
+    tags: list[str],
+    tid: int,
+    source_url: str,
+    cover_path: str | None = None,
+) -> str:
+    job_id = str(uuid.uuid4())
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            """
+            SELECT id, status FROM bilibili_upload_jobs
+            WHERE task_id = ? AND status IN ('queued', 'running', 'succeeded', 'unknown')
+            ORDER BY created_at DESC, rowid DESC LIMIT 1
+            """,
+            (task_id,),
+        ).fetchone()
+        if existing:
+            raise ValueError(f"Bilibili upload already {existing['status']} for this task.")
+        conn.execute(
+            """
+            INSERT INTO bilibili_upload_jobs (
+              id, task_id, status, title, description, tags_json, tid, source_url, cover_path, created_at
+            ) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job_id,
+                task_id,
+                title,
+                description,
+                json.dumps(tags, ensure_ascii=False),
+                tid,
+                source_url,
+                cover_path,
+                now_iso(),
+            ),
+        )
+    return job_id
+
+
+def _upload_job_dict(row: sqlite3.Row) -> dict[str, Any]:
+    result = dict(row)
+    result["tags"] = json.loads(result.pop("tags_json", "[]"))
+    return result
+
+
+def get_bilibili_upload_job(job_id: str) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM bilibili_upload_jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+    return _upload_job_dict(row) if row else None
+
+
+def get_latest_bilibili_upload_job(task_id: str) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM bilibili_upload_jobs
+            WHERE task_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1
+            """,
+            (task_id,),
+        ).fetchone()
+    return _upload_job_dict(row) if row else None
+
+
+def update_bilibili_upload_job(job_id: str, **fields: Any) -> None:
+    allowed = {
+        "status",
+        "result_message",
+        "error_message",
+        "started_at",
+        "completed_at",
+    }
+    updates = {key: value for key, value in fields.items() if key in allowed}
+    if not updates:
+        return
+    assignments = ", ".join(f"{key} = ?" for key in updates)
+    with connect() as conn:
+        conn.execute(
+            f"UPDATE bilibili_upload_jobs SET {assignments} WHERE id = ?",
+            [*updates.values(), job_id],
+        )
+
+
+def fail_stale_bilibili_upload_jobs() -> int:
+    with connect() as conn:
+        queued = conn.execute(
+            """
+            UPDATE bilibili_upload_jobs
+            SET status = 'failed', error_message = ?, completed_at = ?
+            WHERE status = 'queued'
+            """,
+            ("Queued upload interrupted by application restart.", now_iso()),
+        )
+        running = conn.execute(
+            """
+            UPDATE bilibili_upload_jobs
+            SET status = 'unknown', error_message = ?, completed_at = ?
+            WHERE status = 'running'
+            """,
+            (
+                "Upload outcome is unknown after application restart; verify Bilibili before taking further action.",
+                now_iso(),
+            ),
+        )
+    return queued.rowcount + running.rowcount
+
+
 def log_path(task_id: str) -> Path:
     from .config import LOG_DIR
 
@@ -740,6 +934,7 @@ def create_channel_job(
     *,
     job_id: str | None = None,
     kind: str = "process",
+    auto_upload_bilibili: bool = False,
 ) -> str:
     new_id = job_id or str(uuid.uuid4())
     created_at = now_iso()
@@ -747,10 +942,10 @@ def create_channel_job(
         conn.execute(
             """
             INSERT INTO channel_jobs (
-              id, kind, status, channels_json, video_limit, created_at
-            ) VALUES (?, ?, 'queued', ?, ?, ?)
+              id, kind, status, channels_json, video_limit, created_at, auto_upload_bilibili
+            ) VALUES (?, ?, 'queued', ?, ?, ?, ?)
             """,
-            (new_id, kind, json.dumps(channels), int(limit), created_at),
+            (new_id, kind, json.dumps(channels), int(limit), created_at, int(auto_upload_bilibili)),
         )
     return new_id
 
@@ -765,6 +960,7 @@ def get_channel_job(job_id: str) -> dict[str, Any] | None:
         return None
     result = dict(row)
     result["channels"] = json.loads(result.pop("channels_json", "[]"))
+    result["auto_upload_bilibili"] = bool(result["auto_upload_bilibili"])
     return result
 
 
@@ -913,8 +1109,8 @@ def replace_channel_videos(subscription_id: str, videos: list[dict[str, Any]]) -
         conn.executemany(
             """
             INSERT OR REPLACE INTO channel_videos (
-              subscription_id, video_id, video_title, video_url, fetched_at
-            ) VALUES (?, ?, ?, ?, ?)
+              subscription_id, video_id, video_title, video_url, view_count, published_at, fetched_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -922,6 +1118,8 @@ def replace_channel_videos(subscription_id: str, videos: list[dict[str, Any]]) -
                     str(video.get("id") or ""),
                     str(video.get("title") or ""),
                     str(video.get("url") or ""),
+                    video.get("view_count"),
+                    video.get("published_at"),
                     now,
                 )
                 for video in videos

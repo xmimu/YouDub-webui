@@ -242,6 +242,8 @@ macOS / Linux / WSL2：
 | `YTDLP_PROXY_PORT` | yt-dlp 使用的本机代理端口，例如 `7890`。 |
 | `HTTP_PROXY` / `ALL_PROXY` | 未在 UI 中设置代理端口时，yt-dlp 可读取 `HTTP_PROXY`；HTTPX/OpenAI SDK 也会读取这些环境代理。 |
 | `NO_PROXY` | 逗号分隔的代理绕过列表；使用本地 OpenAI 兼容服务时建议包含 `localhost,127.0.0.1,::1`，避免本地请求绕行系统代理。 |
+| `BILIBILI_DEFAULT_TID` | 可选的 Bilibili 默认投稿分区数字 ID；也可以在设置页配置。 |
+| `BILIUP_UPLOAD_TIMEOUT_SECONDS` | 单次 biliup 投稿进程的最长运行时间，默认 `86400` 秒（24 小时）。 |
 | `VOXCPM_MODEL` / `VOXCPM_MODEL_DIR` | VoxCPM2 的 ModelScope 模型名或本地模型目录；VoxCPM 当前由上游包内部选择 CUDA/MPS/CPU，任务日志会显示为 `voxcpm=library-auto`。 |
 | `VOXCPM_LOAD_DENOISER` / `VOXCPM_CFG_VALUE` / `VOXCPM_INFERENCE_TIMESTEPS` / `VOXCPM_MIN_REFERENCE_MS` | VoxCPM2 推理参数。 |
 | `CORS_ALLOW_ORIGINS` / `CORS_ALLOW_ORIGIN_REGEX` | 显式允许的跨源前端来源；不能使用 `*`。同源 Next 代理不需要配置。 |
@@ -322,6 +324,16 @@ Windows 的 `chmod`/`umask` 不等价于 NTFS ACL。Windows 部署需由管理�
    - 本地视频可额外上传一份已翻译好的 `.srt` 字幕；上传后会跳过 Whisper 识别和 OpenAI 翻译，直接用这份字幕生成配音与压制字幕。
    - 翻译方向决定字幕目标语言，例如选择“英文 -> 中文”时，上传的 SRT 会被视为中文字幕。
 8. 进入任务详情页查看阶段进度、运行日志和最终视频。
+
+### 投稿到 Bilibili
+
+1. 打开右上角 Settings，在 Bilibili 账号区域点击扫码登录，并使用哔哩哔哩手机客户端确认。
+2. 填写默认投稿分区的数字 `tid` 并保存。登录凭据只保存在本机 `data/cookies/bilibili.json`，不会返回给浏览器。
+3. 创建 URL 任务时可勾选“完成后自动投稿到 Bilibili”，也可以在任务成功后从详情页手动投稿。频道批量任务和单个频道视频同样支持该选项。
+4. 投稿标题、简介和标签由 summary 阶段自动生成；稿件按转载提交，来源使用原视频 URL。summary 阶段还会自动生成带中文标题的投稿封面（取原视频一帧并裁剪为 3:4）。
+5. Linux 如需生成中文封面，请安装中文字体，例如 `Noto Sans CJK`；macOS 和 Windows 通常已自带相应字体。
+
+本地上传任务没有可公开验证的原始来源 URL，因此不允许投稿。每个任务最多保留一个成功投稿记录，上传前校验失败可以重试；已经开始上传后发生超时、异常或应用重启时会标记为“结果未知”，此时必须先到 Bilibili 创作中心确认，系统不会直接重试，以免重复投稿。
 
 API key 和 Cookie 会在页面中脱敏显示，后端不会把 Cookie 明文返回给前端。
 

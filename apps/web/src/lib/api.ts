@@ -113,6 +113,7 @@ export type Task = {
   started_at: string | null
   completed_at: string | null
   execution_mode: ExecutionMode
+  auto_upload_bilibili: boolean
   stages: TaskStage[]
 }
 
@@ -137,6 +138,40 @@ export type OpenAIModels = {
 
 export type YtdlpSettings = {
   proxy_port: string
+}
+
+export type BilibiliSettings = {
+  default_tid: string
+  connected: boolean
+}
+
+export type BilibiliZone = {
+  id: number
+  name: string
+  parent: number | null
+}
+
+export type BilibiliLoginSession = {
+  id: string
+  qr_url: string
+  status: "pending" | "succeeded" | "failed" | "cancelled"
+  error_message: string | null
+}
+
+export type BilibiliUploadJob = {
+  id: string
+  task_id: string
+  status: "queued" | "running" | "succeeded" | "failed" | "unknown"
+  title: string
+  description: string
+  tags: string[]
+  tid: number
+  source_url: string
+  result_message: string | null
+  error_message: string | null
+  created_at: string
+  started_at: string | null
+  completed_at: string | null
 }
 
 export type LocalDirection = "en-zh" | "zh-en"
@@ -199,6 +234,7 @@ export type TaskSummary = {
   started_at: string | null
   completed_at: string | null
   execution_mode?: ExecutionMode
+  auto_upload_bilibili?: boolean
 }
 
 export type TaskListStatus = "all" | TaskStatus
@@ -289,10 +325,18 @@ export function redoStage(taskId: string, stageName: string) {
   return request<Task>(`/api/tasks/${taskId}/stages/${stageName}/redo`, { method: "POST" })
 }
 
-export function createTask(url: string, executionMode: ExecutionMode = "auto") {
+export function createTask(
+  url: string,
+  executionMode: ExecutionMode = "auto",
+  autoUploadBilibili = false,
+) {
   return request<Task>("/api/tasks", {
     method: "POST",
-    body: JSON.stringify({ url, execution_mode: executionMode }),
+    body: JSON.stringify({
+      url,
+      execution_mode: executionMode,
+      auto_upload_bilibili: autoUploadBilibili,
+    }),
   })
 }
 
@@ -325,6 +369,51 @@ export async function uploadLocalTask(
 
 export function getCookieInfo() {
   return request<CookieInfo>("/api/cookies/youtube")
+}
+
+export function getBilibiliSettings() {
+  return request<BilibiliSettings>("/api/settings/bilibili")
+}
+
+export function getBilibiliZones() {
+  return request<{ zones: BilibiliZone[] }>("/api/settings/bilibili/zones")
+}
+
+export function saveBilibiliSettings(defaultTid: string) {
+  return request<BilibiliSettings>("/api/settings/bilibili", {
+    method: "POST",
+    body: JSON.stringify({ default_tid: defaultTid }),
+  })
+}
+
+export function startBilibiliLogin() {
+  return request<BilibiliLoginSession>("/api/settings/bilibili/login/qrcode", {
+    method: "POST",
+  })
+}
+
+export function getBilibiliLogin(sessionId: string, signal?: AbortSignal) {
+  return request<BilibiliLoginSession>(
+    `/api/settings/bilibili/login/qrcode/${sessionId}`,
+    signal ? { signal } : undefined,
+  )
+}
+
+export function disconnectBilibili() {
+  return request<void>("/api/settings/bilibili/login", { method: "DELETE" })
+}
+
+export function getBilibiliUpload(taskId: string, signal?: AbortSignal) {
+  return request<BilibiliUploadJob | null>(
+    `/api/tasks/${taskId}/uploads/bilibili`,
+    signal ? { signal } : undefined,
+  )
+}
+
+export function createBilibiliUpload(taskId: string) {
+  return request<BilibiliUploadJob>(`/api/tasks/${taskId}/uploads/bilibili`, {
+    method: "POST",
+  })
 }
 
 export function saveCookie(content: string) {
@@ -410,6 +499,7 @@ export type ChannelJob = {
   created_at: string
   started_at: string | null
   completed_at: string | null
+  auto_upload_bilibili: boolean
 }
 
 export function fetchChannels(channels: string[], limit: number) {
@@ -453,10 +543,13 @@ export function subscribeChannel(url: string, groupName: string = "") {
   })
 }
 
+export type ChannelVideoSort = "date" | "views"
+
 export type ChannelVideo = {
   id: string
   title: string
   url: string
+  view_count: number | null
   downloaded: boolean
   task_id: string | null
   task_status: string | null
@@ -480,19 +573,20 @@ export function getChannelVideos(
   subscriptionId: string,
   page: number = 1,
   pageSize: number = 20,
+  sort: ChannelVideoSort = "date",
   signal?: AbortSignal,
 ) {
-  const query = `?page=${page}&page_size=${pageSize}`
+  const query = `?page=${page}&page_size=${pageSize}&sort=${sort}`
   return request<ChannelVideosResponse>(
     `/api/channels/${subscriptionId}/videos${query}`,
     signal ? { signal } : undefined,
   )
 }
 
-export function processAllSubscriptions(limit: number = 2) {
+export function processAllSubscriptions(limit: number = 2, autoUploadBilibili = false) {
   return request<ChannelJob>("/api/channels/process", {
     method: "POST",
-    body: JSON.stringify({ channels: [], limit }),
+    body: JSON.stringify({ channels: [], limit, auto_upload_bilibili: autoUploadBilibili }),
   })
 }
 

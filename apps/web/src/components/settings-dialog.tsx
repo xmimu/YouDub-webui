@@ -2,16 +2,25 @@
 
 import { FormEvent, useEffect, useState } from "react"
 import { Eye, EyeOff, RefreshCw, Settings } from "lucide-react"
+import { QRCodeSVG } from "qrcode.react"
 
 import {
   ApiError,
+  BilibiliLoginSession,
+  BilibiliZone,
+  disconnectBilibili,
+  getBilibiliLogin,
+  getBilibiliSettings,
+  getBilibiliZones,
   getCookieInfo,
   getOpenAIModels,
   getOpenAISettings,
   getYtdlpSettings,
   saveCookie,
+  saveBilibiliSettings,
   saveOpenAISettings,
   saveYtdlpSettings,
+  startBilibiliLogin,
 } from "@/lib/api"
 import { LANGUAGE_OPTIONS, useI18n } from "@/lib/i18n"
 import { Button } from "@/components/ui/button"
@@ -42,13 +51,14 @@ type SettingsForm = {
   model: string
   translateConcurrency: string
   proxyPort: string
+  bilibiliDefaultTid: string
 }
 
 const SAVED_API_KEY_MASK = "********"
 const SAVED_COOKIE_SENTINEL = "__YOUDUB_SAVED_COOKIE__"
 
 type MessageKey = "keySaved"
-type SaveSection = "cookie" | "openai" | "ytdlp"
+type SaveSection = "cookie" | "openai" | "ytdlp" | "bilibili"
 type SaveResult = {
   section: SaveSection
   status: "saved" | "failed" | "unchanged"
@@ -62,6 +72,7 @@ const defaultSettings: SettingsForm = {
   model: "gpt-4o-mini",
   translateConcurrency: "50",
   proxyPort: "",
+  bilibiliDefaultTid: "",
 }
 
 function uniqueModels(models: string[]) {
@@ -82,6 +93,10 @@ export function SettingsDialog() {
   const [apiKeyDirty, setApiKeyDirty] = useState(false)
   const [saveResults, setSaveResults] = useState<SaveResult[]>([])
   const [saving, setSaving] = useState(false)
+  const [bilibiliConnected, setBilibiliConnected] = useState(false)
+  const [bilibiliLogin, setBilibiliLogin] = useState<BilibiliLoginSession | null>(null)
+  const [bilibiliBusy, setBilibiliBusy] = useState(false)
+  const [bilibiliZones, setBilibiliZones] = useState<BilibiliZone[]>([])
 
   const cookieValue =
     settings.cookie === SAVED_COOKIE_SENTINEL ? t.settings.savedCookie : settings.cookie
@@ -89,8 +104,8 @@ export function SettingsDialog() {
 
   useEffect(() => {
     if (!open) return
-    Promise.all([getCookieInfo(), getOpenAISettings(), getYtdlpSettings()])
-      .then(([cookie, openai, ytdlp]) => {
+    Promise.all([getCookieInfo(), getOpenAISettings(), getYtdlpSettings(), getBilibiliSettings()])
+      .then(([cookie, openai, ytdlp, bilibili]) => {
         setSettings({
           cookie: cookie.exists ? SAVED_COOKIE_SENTINEL : "",
           baseUrl: openai.base_url,
@@ -98,7 +113,10 @@ export function SettingsDialog() {
           model: openai.model,
           translateConcurrency: openai.translate_concurrency || "50",
           proxyPort: ytdlp.proxy_port,
+          bilibiliDefaultTid: bilibili.default_tid,
         })
+        setBilibiliConnected(bilibili.connected)
+        setBilibiliLogin(null)
         setModelOptions(uniqueModels([openai.model]))
         setModelsLoaded(false)
         setShowApiKey(false)
@@ -114,11 +132,45 @@ export function SettingsDialog() {
       })
   }, [open])
 
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    getBilibiliZones()
+      .then(({ zones }) => {
+        if (!cancelled) setBilibiliZones(zones)
+      })
+      .catch(() => {
+        // Keep the manual tid input as a fallback when the zone list is unavailable.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open])
+
+  useEffect(() => {
+    if (!open || bilibiliLogin?.status !== "pending") return
+    const controller = new AbortController()
+    const timer = window.setInterval(async () => {
+      try {
+        const next = await getBilibiliLogin(bilibiliLogin.id, controller.signal)
+        setBilibiliLogin(next)
+        if (next.status === "succeeded") setBilibiliConnected(true)
+      } catch (err) {
+        if (!controller.signal.aborted) setMessage(err instanceof Error ? err.message : t.settings.bilibiliLoginFailed)
+      }
+    }, 1500)
+    return () => {
+      controller.abort()
+      window.clearInterval(timer)
+    }
+  }, [bilibiliLogin?.id, bilibiliLogin?.status, open, t.settings.bilibiliLoginFailed])
+
   async function refreshSettingsFromServer() {
-    const [cookieResult, openaiResult, ytdlpResult] = await Promise.allSettled([
+    const [cookieResult, openaiResult, ytdlpResult, bilibiliResult] = await Promise.allSettled([
       getCookieInfo(),
       getOpenAISettings(),
       getYtdlpSettings(),
+      getBilibiliSettings(),
     ])
 
     setSettings((current) => {
@@ -136,6 +188,9 @@ export function SettingsDialog() {
       if (ytdlpResult.status === "fulfilled") {
         refreshed.proxyPort = ytdlpResult.value.proxy_port
       }
+      if (bilibiliResult.status === "fulfilled") {
+        refreshed.bilibiliDefaultTid = bilibiliResult.value.default_tid
+      }
       return refreshed
     })
 
@@ -146,8 +201,9 @@ export function SettingsDialog() {
       setModelOptions(uniqueModels([openaiResult.value.model]))
       setModelsLoaded(false)
     }
+    if (bilibiliResult.status === "fulfilled") setBilibiliConnected(bilibiliResult.value.connected)
 
-    return [cookieResult, openaiResult, ytdlpResult].every(
+    return [cookieResult, openaiResult, ytdlpResult, bilibiliResult].every(
       (result) => result.status === "fulfilled",
     )
   }
@@ -188,6 +244,7 @@ export function SettingsDialog() {
         translate_concurrency: settings.translateConcurrency,
       }))
       await saveSection("ytdlp", () => saveYtdlpSettings({ proxy_port: settings.proxyPort }))
+      await saveSection("bilibili", () => saveBilibiliSettings(settings.bilibiliDefaultTid))
       setSaveResults(results)
       setSettings((current) => ({
         ...current,
@@ -231,6 +288,33 @@ export function SettingsDialog() {
     cookie: t.settings.cookie,
     openai: t.settings.openaiSaveSection,
     ytdlp: t.settings.ytdlpSaveSection,
+    bilibili: t.settings.bilibiliSaveSection,
+  }
+
+  async function beginBilibiliLogin() {
+    setBilibiliBusy(true)
+    setMessage("")
+    try {
+      setBilibiliLogin(await startBilibiliLogin())
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : t.settings.bilibiliLoginFailed)
+    } finally {
+      setBilibiliBusy(false)
+    }
+  }
+
+  async function removeBilibiliLogin() {
+    setBilibiliBusy(true)
+    setMessage("")
+    try {
+      await disconnectBilibili()
+      setBilibiliConnected(false)
+      setBilibiliLogin(null)
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : t.settings.bilibiliLoginFailed)
+    } finally {
+      setBilibiliBusy(false)
+    }
   }
 
   function saveResultText(result: SaveResult) {
@@ -308,6 +392,82 @@ export function SettingsDialog() {
                   }
                   placeholder="7890"
                 />
+              </div>
+              <div className="grid gap-3 rounded-lg border border-border/60 bg-muted/20 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-medium">{t.settings.bilibiliAccount}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {bilibiliConnected ? t.settings.bilibiliConnected : t.settings.bilibiliDisconnected}
+                    </p>
+                  </div>
+                  {bilibiliConnected ? (
+                    <Button type="button" variant="outline" onClick={removeBilibiliLogin} disabled={bilibiliBusy}>
+                      {t.settings.bilibiliDisconnect}
+                    </Button>
+                  ) : (
+                    <Button type="button" variant="outline" onClick={beginBilibiliLogin} disabled={bilibiliBusy}>
+                      {t.settings.bilibiliLogin}
+                    </Button>
+                  )}
+                </div>
+                {bilibiliLogin?.status === "pending" ? (
+                  <div className="grid justify-items-center gap-2 rounded-md bg-white p-4">
+                    <QRCodeSVG value={bilibiliLogin.qr_url} size={180} />
+                    <p className="text-xs text-zinc-600">{t.settings.bilibiliLoginPending}</p>
+                  </div>
+                ) : null}
+                {bilibiliLogin?.status === "failed" ? (
+                  <p className="text-sm text-red-700">
+                    {bilibiliLogin.error_message || t.settings.bilibiliLoginFailed}
+                  </p>
+                ) : null}
+                <div className="grid gap-2">
+                  <Label htmlFor="bilibiliDefaultTid">{t.settings.bilibiliDefaultTid}</Label>
+                  {bilibiliZones.length > 0 ? (
+                    <Select
+                      value={settings.bilibiliDefaultTid}
+                      onValueChange={(value) =>
+                        setSettings((current) => ({
+                          ...current,
+                          bilibiliDefaultTid: value ?? "",
+                        }))
+                      }
+                    >
+                      <SelectTrigger id="bilibiliDefaultTid">
+                        <SelectValue placeholder={t.settings.selectZone} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {bilibiliZones.map((zone) => {
+                          const parent =
+                            zone.parent != null
+                              ? bilibiliZones.find((candidate) => candidate.id === zone.parent)
+                              : null
+                          const label = parent ? `${parent.name} · ${zone.name}` : zone.name
+                          return (
+                            <SelectItem key={zone.id} value={String(zone.id)}>
+                              {label} ({zone.id})
+                            </SelectItem>
+                          )
+                        })}
+                      </SelectContent>
+                    </Select>
+                  ) : (
+                    <Input
+                      id="bilibiliDefaultTid"
+                      inputMode="numeric"
+                      value={settings.bilibiliDefaultTid}
+                      onChange={(event) =>
+                        setSettings((current) => ({
+                          ...current,
+                          bilibiliDefaultTid: event.target.value.replace(/[^0-9]/g, ""),
+                        }))
+                      }
+                      placeholder="171"
+                    />
+                  )}
+                  <p className="text-xs text-muted-foreground">{t.settings.bilibiliDefaultTidHelp}</p>
+                </div>
               </div>
               <div className="grid gap-2">
                 <Label htmlFor="baseUrl">{t.settings.baseUrl}</Label>

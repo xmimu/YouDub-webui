@@ -16,7 +16,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, SecretStr
 
-from . import auth, channel_jobs, database, runtime_security, worker
+from . import (
+    auth,
+    bilibili_auth,
+    bilibili_uploads,
+    channel_jobs,
+    database,
+    runtime_security,
+    worker,
+)
 from .adapters.local_subtitles import parse_srt, uploaded_subtitle_dir
 from .adapters.local_video import remove_upload, uploaded_video_dir
 from .adapters.openai_client import validate_openai_base_url
@@ -63,6 +71,7 @@ def mask_secret(value: str) -> str:
 class TaskCreate(BaseModel):
     url: str
     execution_mode: str = "auto"
+    auto_upload_bilibili: bool = False
 
 
 class ContinueTaskRequest(BaseModel):
@@ -88,6 +97,10 @@ class OpenAIModelsRequest(BaseModel):
 
 class YtdlpSettingsUpdate(BaseModel):
     proxy_port: str = ""
+
+
+class BilibiliSettingsUpdate(BaseModel):
+    default_tid: str = ""
 
 
 class LoginRequest(BaseModel):
@@ -120,6 +133,18 @@ def normalize_translate_concurrency(value: str) -> str:
     return concurrency
 
 
+def normalize_bilibili_tid(value: str) -> str:
+    tid = value.strip()
+    if not tid:
+        return ""
+    if not tid.isdigit() or not 1 <= int(tid) <= 65535:
+        raise HTTPException(
+            status_code=422,
+            detail="Bilibili category ID must be an integer between 1 and 65535.",
+        )
+    return tid
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     ensure_runtime_dirs()
@@ -128,6 +153,7 @@ async def lifespan(app: FastAPI):
     database.delete_expired_auth_sessions(database.now_iso())
     database.backfill_titles_from_metadata()
     database.fail_stale_active_tasks()
+    bilibili_uploads.start()
     worker.start(run_task)
     channel_jobs.start()
     yield
@@ -333,11 +359,17 @@ def create_task(payload: TaskCreate) -> dict:
     if existing_id:
         return database.get_task(existing_id)
 
+    if payload.auto_upload_bilibili:
+        try:
+            bilibili_uploads.validate_ready()
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     _ensure_runtime_ready()
     task_id = database.create_task(
         validated_url.url,
         task_id=validated_url.video_id,
         execution_mode=normalize_execution_mode(payload.execution_mode),
+        auto_upload_bilibili=payload.auto_upload_bilibili,
     )
     worker.enqueue(task_id)
     return database.get_task(task_id)
@@ -517,7 +549,7 @@ def _reveal_in_file_manager(directory: Path) -> None:
         subprocess.run(["xdg-open", str(directory)], check=True)
 
 
-def _purge_task(task: dict) -> None:
+def _purge_task(task: dict, *, preserve_uploads: bool = False) -> None:
     session_path = task.get("session_path")
     if session_path:
         session_dir = Path(session_path)
@@ -526,7 +558,7 @@ def _purge_task(task: dict) -> None:
     log_file = database.log_path(task["id"])
     if log_file.exists():
         log_file.unlink()
-    database.delete_task(task["id"])
+    database.delete_task(task["id"], delete_upload_jobs=not preserve_uploads)
 
 
 @app.delete("/api/tasks/{task_id}", status_code=204)
@@ -536,6 +568,9 @@ def delete_task(task_id: str) -> Response:
         raise HTTPException(status_code=404, detail="Task not found.")
     if task["status"] == "running":
         raise HTTPException(status_code=409, detail="Cannot delete a running task.")
+    upload_job = database.get_latest_bilibili_upload_job(task_id)
+    if upload_job and upload_job["status"] in {"queued", "running"}:
+        raise HTTPException(status_code=409, detail="Cannot delete a task while it is uploading.")
     _purge_task(task)
     if is_local_upload_url(task["url"]):
         remove_upload(WORKFOLDER, task["id"])
@@ -553,8 +588,17 @@ def rerun_task(task_id: str) -> dict:
     _ensure_runtime_ready()
     url = task["url"]
     execution_mode = task.get("execution_mode") or database.DEFAULT_EXECUTION_MODE
-    _purge_task(task)
-    new_id = database.create_task(url, task_id=task_id, execution_mode=execution_mode)
+    auto_upload_bilibili = bool(task.get("auto_upload_bilibili"))
+    upload_job = database.get_latest_bilibili_upload_job(task_id)
+    if upload_job and upload_job["status"] in {"queued", "running"}:
+        raise HTTPException(status_code=409, detail="Cannot rerun a task while it is uploading.")
+    _purge_task(task, preserve_uploads=True)
+    new_id = database.create_task(
+        url,
+        task_id=task_id,
+        execution_mode=execution_mode,
+        auto_upload_bilibili=auto_upload_bilibili,
+    )
     worker.enqueue(new_id)
     return database.get_task(new_id)
 
@@ -674,6 +718,23 @@ def open_task_folder(task_id: str) -> dict:
     return {"opened": True, "path": str(session_dir)}
 
 
+@app.get("/api/tasks/{task_id}/uploads/bilibili")
+def get_bilibili_upload(task_id: str) -> dict | None:
+    if not database.get_task(task_id):
+        raise HTTPException(status_code=404, detail="Task not found.")
+    return database.get_latest_bilibili_upload_job(task_id)
+
+
+@app.post("/api/tasks/{task_id}/uploads/bilibili", status_code=202)
+def create_bilibili_upload(task_id: str) -> dict:
+    try:
+        return bilibili_uploads.create_for_task(task_id)
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = 404 if detail == "Task not found." else 409
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+
+
 @app.get("/api/cookies/youtube")
 def get_youtube_cookie() -> dict:
     metadata = runtime_security.private_file_stat(YOUTUBE_COOKIE_PATH)
@@ -764,9 +825,51 @@ def save_ytdlp_settings(payload: YtdlpSettingsUpdate) -> dict:
     return get_ytdlp_settings()
 
 
+@app.get("/api/settings/bilibili")
+def get_bilibili_settings() -> dict:
+    return {
+        **database.get_bilibili_settings(),
+        **bilibili_auth.credential_status(),
+    }
+
+
+@app.get("/api/settings/bilibili/zones")
+def get_bilibili_zones() -> dict:
+    return {"zones": bilibili_auth.zones()}
+
+
+@app.post("/api/settings/bilibili")
+def save_bilibili_settings(payload: BilibiliSettingsUpdate) -> dict:
+    database.save_bilibili_settings(normalize_bilibili_tid(payload.default_tid))
+    return get_bilibili_settings()
+
+
+@app.post("/api/settings/bilibili/login/qrcode", status_code=201)
+def start_bilibili_qrcode_login() -> dict:
+    try:
+        return bilibili_auth.start_login()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.get("/api/settings/bilibili/login/qrcode/{session_id}")
+def get_bilibili_qrcode_login(session_id: str) -> dict:
+    session = bilibili_auth.get_login(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Bilibili login session not found.")
+    return session
+
+
+@app.delete("/api/settings/bilibili/login", status_code=204)
+def disconnect_bilibili() -> Response:
+    bilibili_auth.disconnect()
+    return Response(status_code=204)
+
+
 class ChannelFetchRequest(BaseModel):
     channels: list[str]
     limit: int = 2
+    auto_upload_bilibili: bool = False
 
 
 class ChannelSubscribeRequest(BaseModel):
@@ -791,7 +894,16 @@ def fetch_channels(payload: ChannelFetchRequest) -> dict:
             detail=f"Too many channels (max {CHANNELS_MAX_COUNT}).",
         )
     limit = max(CHANNEL_LIMIT_MIN, min(payload.limit, CHANNEL_LIMIT_MAX))
-    job_id = database.create_channel_job(channels, limit)
+    if payload.auto_upload_bilibili:
+        try:
+            bilibili_uploads.validate_ready()
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    job_id = database.create_channel_job(
+        channels,
+        limit,
+        auto_upload_bilibili=payload.auto_upload_bilibili,
+    )
     channel_jobs.enqueue(job_id)
     return database.get_channel_job(job_id)
 
@@ -841,12 +953,20 @@ def channel_videos(
     subscription_id: str,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    sort: Literal["date", "views"] = "date",
 ) -> dict:
     subscription = database.get_channel_subscription(subscription_id)
     if not subscription:
         raise HTTPException(status_code=404, detail="Channel subscription not found.")
 
     cached = database.list_channel_videos(subscription_id)
+    if sort == "views":
+        cached.sort(
+            key=lambda v: v.get("view_count") if isinstance(v.get("view_count"), int) else -1,
+            reverse=True,
+        )
+    # sort == "date"：保持频道页顺序（最新在前），无需额外排序。
+
     enriched: list[dict] = []
     for video in cached:
         task: dict | None = None
@@ -878,6 +998,7 @@ def channel_videos(
                 "id": video["video_id"],
                 "title": video["video_title"],
                 "url": video["video_url"],
+                "view_count": video.get("view_count"),
                 "downloaded": task is not None,
                 "task_id": task["id"] if task else None,
                 "task_status": task["status"] if task else None,
@@ -934,6 +1055,15 @@ def process_all_subscriptions(payload: ChannelFetchRequest) -> dict:
     if not channels:
         raise HTTPException(status_code=422, detail="No subscribed channels.")
     limit = max(CHANNEL_LIMIT_MIN, min(payload.limit, CHANNEL_LIMIT_MAX))
-    job_id = database.create_channel_job(channels, limit)
+    if payload.auto_upload_bilibili:
+        try:
+            bilibili_uploads.validate_ready()
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    job_id = database.create_channel_job(
+        channels,
+        limit,
+        auto_upload_bilibili=payload.auto_upload_bilibili,
+    )
     channel_jobs.enqueue(job_id)
     return database.get_channel_job(job_id)

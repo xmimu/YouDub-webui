@@ -22,6 +22,7 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   ChannelVideo,
+  ChannelVideoSort,
   createTask,
   finalVideoUrl,
   getChannelVideos,
@@ -38,25 +39,39 @@ type PlayTarget =
   | { kind: "video"; src: string; title: string }
   | { kind: "youtube"; videoId: string; title: string }
 
+function formatViews(n: number | null, language: string): string {
+  if (n == null) return ""
+  if (language === "zh") {
+    if (n >= 1e8) return `${(n / 1e8).toFixed(1)}亿`
+    if (n >= 1e4) return `${(n / 1e4).toFixed(1)}万`
+    return String(n)
+  }
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`
+  return String(n)
+}
+
 export default function ChannelDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params)
-  const { t } = useI18n()
+  const { t, language } = useI18n()
   const [channelName, setChannelName] = useState("")
   const [channelUrl, setChannelUrl] = useState("")
   const [videos, setVideos] = useState<ChannelVideo[]>([])
   const [total, setTotal] = useState(0)
   const [totalPages, setTotalPages] = useState(1)
   const [page, setPage] = useState(1)
+  const [sort, setSort] = useState<ChannelVideoSort>("date")
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
   const [addingId, setAddingId] = useState<string | null>(null)
   const [addError, setAddError] = useState("")
   const [refreshing, setRefreshing] = useState(false)
   const [playTarget, setPlayTarget] = useState<PlayTarget | null>(null)
+  const [autoUploadBilibili, setAutoUploadBilibili] = useState(false)
 
   const load = useCallback(async (context?: SerialPollingContext) => {
     try {
-      const res = await getChannelVideos(id, page, PAGE_SIZE, context?.signal)
+      const res = await getChannelVideos(id, page, PAGE_SIZE, sort, context?.signal)
       if (context && !context.isCurrent()) return
       setChannelName(res.subscription.channel_name || res.subscription.channel_url)
       setChannelUrl(res.subscription.channel_url)
@@ -70,9 +85,14 @@ export default function ChannelDetailPage({ params }: { params: Promise<{ id: st
       setLoading(false)
       setError(err instanceof Error ? err.message : t.channels.error)
     }
-  }, [id, page, t])
+  }, [id, page, sort, t])
 
   const invalidate = useSerialPolling(load, 15000)
+
+  const changeSort = useCallback((next: ChannelVideoSort) => {
+    setPage(1)
+    setSort(next)
+  }, [])
 
   const handleRefresh = useCallback(async () => {
     if (refreshing) return
@@ -95,7 +115,7 @@ export default function ChannelDetailPage({ params }: { params: Promise<{ id: st
       setAddingId(video.id)
       setAddError("")
       try {
-        const task = await createTask(video.url, "auto")
+        const task = await createTask(video.url, "auto", autoUploadBilibili)
         setVideos((prev) =>
           prev.map((v) =>
             v.id === video.id
@@ -112,7 +132,7 @@ export default function ChannelDetailPage({ params }: { params: Promise<{ id: st
         setAddingId(null)
       }
     },
-    [addingId, t],
+    [addingId, autoUploadBilibili, t],
   )
 
   const handleOpenFolder = useCallback(
@@ -230,6 +250,15 @@ export default function ChannelDetailPage({ params }: { params: Promise<{ id: st
             <CardDescription>
               {loading ? t.common.loading : `${total} ${t.channels.videoCount}`}
             </CardDescription>
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={autoUploadBilibili}
+                onChange={(event) => setAutoUploadBilibili(event.target.checked)}
+                className="mt-0.5 size-4 accent-[#00aeec]"
+              />
+              <span>{t.home.autoUploadBilibili}</span>
+            </label>
           </CardHeader>
         </Card>
 
@@ -237,6 +266,26 @@ export default function ChannelDetailPage({ params }: { params: Promise<{ id: st
 
         <Card>
           <CardContent className="p-0">
+            {!loading && videos.length > 0 ? (
+              <div className="flex items-center justify-end gap-1.5 border-b border-border/60 px-4 py-2">
+                <Button
+                  type="button"
+                  variant={sort === "date" ? "secondary" : "ghost"}
+                  size="sm"
+                  onClick={() => changeSort("date")}
+                >
+                  {t.channels.sortByNewest}
+                </Button>
+                <Button
+                  type="button"
+                  variant={sort === "views" ? "secondary" : "ghost"}
+                  size="sm"
+                  onClick={() => changeSort("views")}
+                >
+                  {t.channels.sortByViews}
+                </Button>
+              </div>
+            ) : null}
             {loading ? (
               <div className="flex items-center justify-center gap-2 p-8 text-muted-foreground">
                 <Loader2 className="size-4 animate-spin" />
@@ -260,6 +309,13 @@ export default function ChannelDetailPage({ params }: { params: Promise<{ id: st
                       >
                         {video.title || video.id}
                       </a>
+                      <div className="flex shrink-0 flex-col items-end gap-0.5 text-xs text-muted-foreground">
+                        {video.view_count != null ? (
+                          <span className="whitespace-nowrap tabular-nums">
+                            {formatViews(video.view_count, language)} {t.channels.views}
+                          </span>
+                        ) : null}
+                      </div>
                       {video.downloaded ? (
                         renderDownloadedActions(video)
                       ) : (

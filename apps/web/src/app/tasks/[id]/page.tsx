@@ -11,19 +11,23 @@ import {
   Play,
   RotateCw,
   Trash2,
+  Upload,
   XCircle,
 } from "lucide-react"
 
 import {
   ExecutionMode,
+  BilibiliUploadJob,
   StageStatus,
   Task,
   continueTask,
+  createBilibiliUpload,
   deleteTask,
   finalVideoDownloadUrl,
   finalVideoUrl,
   getTask,
   getTaskLog,
+  getBilibiliUpload,
   isAbortError,
   redoStage,
   rerunTask,
@@ -105,6 +109,9 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
   const [redoingStage, setRedoingStage] = useState<string | null>(null)
   const [redoConfirmStage, setRedoConfirmStage] = useState<string | null>(null)
   const [redoError, setRedoError] = useState("")
+  const [bilibiliUpload, setBilibiliUpload] = useState<BilibiliUploadJob | null>(null)
+  const [bilibiliUploading, setBilibiliUploading] = useState(false)
+  const [bilibiliUploadError, setBilibiliUploadError] = useState("")
 
   const pollTask = useCallback(async ({ signal, isCurrent }: SerialPollingContext) => {
     try {
@@ -113,6 +120,8 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
       setTask(next)
       const logText = await getTaskLog(id, signal)
       if (isCurrent()) setLog(logText)
+      const upload = await getBilibiliUpload(id, signal)
+      if (isCurrent()) setBilibiliUpload(upload)
     } catch (err) {
       if (isCurrent() && !isAbortError(err)) {
         setError(err instanceof Error ? err.message : t.task.loadError)
@@ -205,6 +214,18 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
     if (succeeded) setRedoConfirmStage(null)
   }
 
+  const handleBilibiliUpload = async () => {
+    setBilibiliUploading(true)
+    setBilibiliUploadError("")
+    try {
+      setBilibiliUpload(await createBilibiliUpload(id))
+    } catch (err) {
+      setBilibiliUploadError(err instanceof Error ? err.message : t.task.bilibiliUploadError)
+    } finally {
+      setBilibiliUploading(false)
+    }
+  }
+
   const isRunning = task?.status === "running"
   const isQueued = task?.status === "queued"
   const isFailed = task?.status === "failed"
@@ -272,6 +293,8 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
                 <dd>
                   {task.execution_mode === "manual" ? t.task.executionManual : t.task.executionAuto}
                 </dd>
+                <dt className="text-muted-foreground">{t.task.bilibiliAutoUpload}</dt>
+                <dd>{task.auto_upload_bilibili ? t.task.bilibiliAutoEnabled : "—"}</dd>
                 {task.session_path ? (
                   <>
                     <dt className="text-muted-foreground">{t.task.session}</dt>
@@ -300,10 +323,46 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
                 className="w-full rounded-md border border-emerald-200 bg-black"
               />
               <p className="break-all text-xs text-muted-foreground">{task.final_video_path}</p>
-              <Button nativeButton={false} render={<a href={finalVideoDownloadUrl(task.id)} />}>
-                <Download className="size-4" />
-                {t.task.download}
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                <Button nativeButton={false} render={<a href={finalVideoDownloadUrl(task.id)} />}>
+                  <Download className="size-4" />
+                  {t.task.download}
+                </Button>
+                {bilibiliUpload?.status !== "succeeded" && bilibiliUpload?.status !== "unknown" && !task.url.startsWith("local://") ? (
+                  <Button
+                    variant="outline"
+                    onClick={handleBilibiliUpload}
+                    disabled={bilibiliUploading || bilibiliUpload?.status === "queued" || bilibiliUpload?.status === "running"}
+                  >
+                    {bilibiliUploading || bilibiliUpload?.status === "running" ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <Upload className="size-4" />
+                    )}
+                    {bilibiliUpload?.status === "running" ? t.task.bilibiliUploading : t.task.bilibiliUpload}
+                  </Button>
+                ) : null}
+              </div>
+              {bilibiliUpload ? (
+                <div className={`rounded-lg border px-3 py-2 text-sm ${
+                  bilibiliUpload.status === "failed" || bilibiliUpload.status === "unknown"
+                    ? "border-red-200 bg-red-50 text-red-700"
+                    : "border-sky-200 bg-sky-50 text-sky-800"
+                }`}>
+                  {bilibiliUpload.status === "queued" ? t.task.bilibiliUploadQueued : null}
+                  {bilibiliUpload.status === "running" ? t.task.bilibiliUploading : null}
+                  {bilibiliUpload.status === "succeeded" ? t.task.bilibiliUploadSucceeded : null}
+                  {bilibiliUpload.status === "failed"
+                    ? bilibiliUpload.error_message || t.task.bilibiliUploadFailed
+                    : null}
+                  {bilibiliUpload.status === "unknown" ? t.task.bilibiliUploadUnknown : null}
+                </div>
+              ) : null}
+              {bilibiliUploadError ? (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  {bilibiliUploadError}
+                </div>
+              ) : null}
             </CardContent>
           </Card>
         ) : null}

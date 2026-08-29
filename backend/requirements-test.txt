@@ -13,5 +13,6 @@ requests
 numpy
 soundfile
 pydub
+Pillow
 pytest
 httpx[socks]

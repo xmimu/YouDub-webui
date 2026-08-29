@@ -43,6 +43,12 @@ describe("设置分项保存反馈", () => {
       if (method === "GET" && path === "/api/settings/ytdlp") {
         return jsonResponse({ proxy_port: "7890" })
       }
+      if (method === "GET" && path === "/api/settings/bilibili") {
+        return jsonResponse({ default_tid: "171", connected: false })
+      }
+      if (method === "GET" && path === "/api/settings/bilibili/zones") {
+        return jsonResponse({ zones: [{ id: 36, name: "知识", parent: null }] })
+      }
       if (method === "POST" && path === "/api/cookies/youtube") {
         return jsonResponse({ exists: true, size: 256, updated_at: 2, content: "" })
       }
@@ -60,6 +66,9 @@ describe("设置分项保存反馈", () => {
           { detail: "validation failed for cookie-secret and sk-secret" },
           422,
         )
+      }
+      if (method === "POST" && path === "/api/settings/bilibili") {
+        return jsonResponse({ default_tid: "171", connected: false })
       }
       throw new Error(`未预期的请求: ${method} ${path}`)
     })
@@ -104,12 +113,14 @@ describe("设置分项保存反馈", () => {
       "/api/cookies/youtube",
       "/api/settings/openai",
       "/api/settings/ytdlp",
+      "/api/settings/bilibili",
     ])
 
     for (const path of [
       "/api/cookies/youtube",
       "/api/settings/openai",
       "/api/settings/ytdlp",
+      "/api/settings/bilibili",
     ]) {
       const getCount = mocks.fetch.mock.calls.filter(
         ([input, init]) => String(input) === path && (init?.method || "GET") === "GET",

@@ -34,6 +34,7 @@ function taskWithStatus(status: TaskStatus): Task {
     started_at: null,
     completed_at: null,
     execution_mode: "manual",
+    auto_upload_bilibili: false,
     stages: [{
       task_id: "task-race",
       name: "download",
@@ -79,6 +80,9 @@ describe("任务详情轮询", () => {
       }
       if (method === "GET" && path === "/api/tasks/task-race/log") {
         return new Response("initial log", { status: 200 })
+      }
+      if (method === "GET" && path === "/api/tasks/task-race/uploads/bilibili") {
+        return jsonResponse(null)
       }
       if (method === "POST" && path === "/api/tasks/task-race/continue") {
         return jsonResponse(taskWithStatus("queued"))

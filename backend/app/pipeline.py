@@ -460,3 +460,6 @@ class PipelineRunner:
 
 def run_task(task_id: str) -> None:
     PipelineRunner(task_id).run()
+    from . import bilibili_uploads
+
+    bilibili_uploads.enqueue_auto_for_task(task_id)
