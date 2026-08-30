@@ -282,7 +282,7 @@ def test_list_zones_flattens_tree_and_is_cached(monkeypatch, tmp_path):
     assert calls["count"] == 1
 
 
-def test_cover_composition_returns_3x4_jpeg(monkeypatch, tmp_path):
+def test_cover_composition_returns_16x10_jpeg(monkeypatch, tmp_path):
     frame = tmp_path / "frame.jpg"
     Image.new("RGB", (1920, 1080), (30, 60, 90)).save(frame, "JPEG")
     out = tmp_path / "cover.jpg"
@@ -293,7 +293,7 @@ def test_cover_composition_returns_3x4_jpeg(monkeypatch, tmp_path):
     with Image.open(out) as image:
         assert image.format == "JPEG"
         assert image.size == (summary.COVER_WIDTH, summary.COVER_HEIGHT)
-        assert image.size[0] / image.size[1] == 3 / 4
+        assert image.size[0] / image.size[1] == 16 / 10
 
 
 def test_generate_summary_writes_cover_path(monkeypatch, tmp_path):
@@ -368,4 +368,3 @@ def test_create_for_task_rejects_cover_outside_workfolder(monkeypatch, tmp_path)
 
     with pytest.raises(ValueError, match="cover"):
         bilibili_uploads.create_for_task(task_id)
-

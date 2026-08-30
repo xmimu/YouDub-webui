@@ -14,8 +14,9 @@ logger = logging.getLogger(__name__)
 
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 
-COVER_WIDTH = 1080
-COVER_HEIGHT = 1440
+# Bilibili's web cover upload endpoint uses a 16:10 canvas.
+COVER_WIDTH = 1600
+COVER_HEIGHT = 1000
 
 
 def _load_settings() -> dict[str, str]:
